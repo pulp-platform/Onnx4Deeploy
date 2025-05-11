@@ -9,8 +9,8 @@ import numpy as np
 import onnxruntime.tools
 from onnxruntime.tools import symbolic_shape_infer
 import copy
-from .fixshape import print_onnx_shapes
-from .trainoptimization import *
+from .fixShape import print_onnx_shapes
+from .trainOptimization import *
 import random
 from onnx import TensorProto
 
@@ -222,6 +222,12 @@ def run_train_onnx_optimization(onnx_train_file, onnx_output_file):
     remove_softmax_grad_loss_inputs(onnx_output_file, onnx_output_file)
     print(
         f"✅ Successfully removed Softmax Grad Loss inputs. Saved as {onnx_output_file}"
+    )
+    process_layernormgrad_nodes(
+        onnx_output_file, onnx_output_file
+    )  # Process LayerNormGrad nodes
+    print(
+        f"✅ Successfully processed LayerNormGrad nodes. Saved as {onnx_output_file}"
     )
     
     print_onnx_shapes(onnx_output_file)

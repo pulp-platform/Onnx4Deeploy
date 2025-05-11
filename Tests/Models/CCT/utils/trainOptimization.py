@@ -759,15 +759,8 @@ def optimize_reshape_fusion(input_model_path: str, output_model_path: str) -> No
 
 def remove_identity_reducesum(input_model_path, output_model_path):
     """
-    Remove Identity and removable ReduceSum nodes from the model,
-    ensuring correct output naming
-    
-    Args:
-        input_model_path (str): Input ONNX model path
-        output_model_path (str): Output ONNX model path
-    
-    Returns:
-        onnx.ModelProto: Processed model
+    Fixed version of remove_identity_reducesum to handle multiple levels of Identity
+    and transform appropriate ReduceSum nodes to Reshape operations
     """
     import onnx
     import numpy as np
@@ -782,10 +775,21 @@ def remove_identity_reducesum(input_model_path, output_model_path):
     
     graph = model.graph
     
-    # Build node mapping
+    # Build node mapping and input-output relationships
     node_map = {node.name: node for node in graph.node}
+    output_to_node = {}  # maps output name to producing node
+    input_to_nodes = {}  # maps input name to consuming nodes
     
-    # Store tensor shapes from value_info, inputs, and outputs
+    for node in graph.node:
+        for output in node.output:
+            output_to_node[output] = node
+        
+        for input_name in node.input:
+            if input_name not in input_to_nodes:
+                input_to_nodes[input_name] = []
+            input_to_nodes[input_name].append(node)
+    
+    # Store tensor shapes
     shape_info = {}
     for info in list(graph.value_info) + list(graph.input) + list(graph.output):
         if hasattr(info.type.tensor_type.shape, 'dim'):
@@ -801,25 +805,43 @@ def remove_identity_reducesum(input_model_path, output_model_path):
     for initializer in graph.initializer:
         shape_info[initializer.name] = list(initializer.dims)
     
-    # Store nodes to remove and replacement mapping
-    nodes_to_remove = []
+    # Identity resolution: build a complete mapping directly to the source
     replacement_map = {}
-    reshape_nodes_to_add = []
+    identity_nodes = []
     
-    # Process Identity nodes
+    # First pass: collect all Identity nodes
     for node in graph.node:
         if node.op_type == "Identity":
-            input_name = node.input[0]
-            output_name = node.output[0]
-            
-            replacement_map[output_name] = input_name
-            nodes_to_remove.append(node)
+            identity_nodes.append(node)
+    
+    # Function to recursively resolve Identity chains
+    def resolve_identity_source(tensor_name):
+        """Recursively resolve the source of a tensor through Identity nodes"""
+        if tensor_name in output_to_node and output_to_node[tensor_name].op_type == "Identity":
+            identity_node = output_to_node[tensor_name]
+            source_name = identity_node.input[0]
+            # Recursive call to handle chained identities
+            return resolve_identity_source(source_name)
+        return tensor_name
+    
+    # Build replacement map by resolving full Identity chains at once
+    for node in identity_nodes:
+        output_name = node.output[0]
+        source_name = resolve_identity_source(node.input[0])  # Get the ultimate source
+        replacement_map[output_name] = source_name
     
     # Process ReduceSum nodes
+    reducesum_nodes = []
+    reshape_nodes_to_add = []
+    
     for node in graph.node:
         if node.op_type == "ReduceSum":
             input_name = node.input[0]
             output_name = node.output[0]
+            
+            # Resolve input if it's from an Identity node
+            if input_name in replacement_map:
+                input_name = replacement_map[input_name]
             
             # Check for dimension 1 reduction with keepdims=0
             keepdims = 1  # Default value
@@ -866,13 +888,13 @@ def remove_identity_reducesum(input_model_path, output_model_path):
                     if keepdims == 1:
                         # Simple replacement case
                         replacement_map[output_name] = input_name
-                        nodes_to_remove.append(node)
+                        reducesum_nodes.append(node)
                     elif keepdims == 0:
                         # Need to add a Reshape node
                         # Calculate output shape by removing dimensions with size 1
                         output_shape = []
                         for i, dim in enumerate(input_shape):
-                            if i not in axes and (i + len(input_shape) not in axes):
+                            if i not in axes and (i - len(input_shape)) not in axes:
                                 output_shape.append(dim)
                         
                         # Create shape tensor for Reshape
@@ -894,29 +916,75 @@ def remove_identity_reducesum(input_model_path, output_model_path):
                         
                         # Store for later addition
                         reshape_nodes_to_add.append((reshape_node, shape_tensor))
-                        nodes_to_remove.append(node)
+                        reducesum_nodes.append(node)
     
-    # Update inputs of other nodes
+    # Update all node inputs using the complete replacement mapping
     for node in graph.node:
-        if node not in nodes_to_remove:
+        if node not in identity_nodes and node not in reducesum_nodes:
+            modified = False
             for i, input_name in enumerate(node.input):
+                # Apply replacement if needed, with special attention to Reshape nodes
                 if input_name in replacement_map:
                     node.input[i] = replacement_map[input_name]
+                    modified = True
+                    
+                    # Special handling for Reshape nodes to ensure shape info is preserved
+                    if node.op_type == "Reshape" and i == 0:  # If this is the data input to Reshape
+                        # If a Reshape node's input was replaced, ensure shape remains correct
+                        if len(node.input) > 1:  # Has shape input
+                            shape_input = node.input[1]
+                            # Verify shape input exists
+                            shape_exists = False
+                            for init in graph.initializer:
+                                if init.name == shape_input:
+                                    shape_exists = True
+                                    break
+                            
+                            if not shape_exists:
+                                print(f"Warning: Reshape node {node.name} has missing shape input after Identity removal")
+                                # Attempt to create a shape input if missing
+                                if node.output[0] in shape_info:
+                                    output_shape = shape_info[node.output[0]]
+                                    shape_tensor_name = f"{node.name}_shape_fixed"
+                                    shape_tensor = helper.make_tensor(
+                                        name=shape_tensor_name,
+                                        data_type=TensorProto.INT64,
+                                        dims=[len(output_shape)],
+                                        vals=output_shape
+                                    )
+                                    graph.initializer.append(shape_tensor)
+                                    node.input[1] = shape_tensor_name
+                                    print(f"  Fixed: Added shape tensor {shape_tensor_name} with shape {output_shape}")
+            
+            if modified and node.op_type == "Reshape":
+                print(f"Updated inputs for Reshape node: {node.name}")
+                print(f"  New inputs: {node.input}")
     
     # Update graph outputs
     for output in graph.output:
         if output.name in replacement_map:
-            output.name = replacement_map[output.name]
+            # Find the value_info for the replacement tensor
+            replacement_info = None
+            for info in graph.value_info:
+                if info.name == replacement_map[output.name]:
+                    replacement_info = info
+                    break
+            
+            if replacement_info:
+                # Copy type information from the replacement
+                output.type.CopyFrom(replacement_info.type)
+            
+            # Update name
+            old_name = output.name
+            output.name = replacement_map[old_name]
+            print(f"Updated graph output: {old_name} -> {output.name}")
     
     # Remove nodes and add new reshape nodes
-    new_nodes = [node for node in graph.node if node not in nodes_to_remove]
+    new_nodes = [node for node in graph.node if node not in identity_nodes and node not in reducesum_nodes]
     
-    # Add shape tensors to initializers
-    for _, shape_tensor in reshape_nodes_to_add:
+    # Add shape tensors to initializers and reshape nodes
+    for reshape_node, shape_tensor in reshape_nodes_to_add:
         graph.initializer.append(shape_tensor)
-    
-    # Add reshape nodes
-    for reshape_node, _ in reshape_nodes_to_add:
         new_nodes.append(reshape_node)
     
     # Clear and re-add nodes
@@ -927,11 +995,11 @@ def remove_identity_reducesum(input_model_path, output_model_path):
     onnx.save(model, output_model_path)
     
     print(f"Saved to {output_model_path}")
-    print(f"Removed {len(nodes_to_remove)} nodes")
+    print(f"Removed {len(identity_nodes)} Identity nodes")
+    print(f"Removed {len(reducesum_nodes)} ReduceSum nodes")
     print(f"Added {len(reshape_nodes_to_add)} Reshape nodes")
     
     return model
-
 
 def convert_reducesum_axes_to_attr(input_file: str, output_file: str):
     model = onnx.load(input_file)
@@ -1589,3 +1657,82 @@ def optimize_softmax_axis(input_model_path, output_model_path):
     print(f"Optimization complete. Modified {len(nodes_to_remove)} Softmax nodes.")
     return optimized
 
+def process_layernormgrad_nodes(model_path, output_path):
+    """
+    Process LayerNormalizationGrad nodes to:
+    1. Keep only the data gradient as output
+    2. Modify inputs to keep only: upstream gradient, input, weight, and bias
+    
+    Args:
+        model_path: Path to the input ONNX model
+        output_path: Path where the modified model will be saved
+    """
+    # Load the model
+    model = onnx.load(model_path)
+    
+    # Process each node
+    for i, node in enumerate(model.graph.node):
+        if node.op_type == "LayerNormalizationGrad":
+            # Get the original inputs and outputs
+            inputs = list(node.input)
+            outputs = list(node.output)
+            
+            if len(outputs) >= 1:
+                # Keep only the first output (data gradient)
+                data_grad = outputs[0]
+                del node.output[:]
+                node.output.append(data_grad)
+            
+            # Now modify the inputs
+            # We need to find the bias input or create a connection for it
+            # Assuming the bias is available somewhere in the graph
+            
+            # Find where the bias might be
+            bias_name = None
+            
+            # Option 1: Try to find if bias exists as an initializer
+            # Naming convention might be similar to weight name but with "bias" instead of "weight"
+            if len(inputs) >= 3:
+                weight_name = inputs[2]  # Assuming weight is the third input
+                possible_bias_name = weight_name.replace("weight", "bias")
+                
+                # Check if this name exists in initializers
+                for initializer in model.graph.initializer:
+                    if initializer.name == possible_bias_name:
+                        bias_name = possible_bias_name
+                        break
+            
+            # Option 2: If bias name not found, look in other nodes' inputs
+            if bias_name is None:
+                for n in model.graph.node:
+                    if n.op_type == "LayerNormalization":
+                        # LayerNorm forward node typically has bias as input
+                        if len(n.input) >= 3:
+                            # Usually the third input to LayerNorm is bias
+                            bias_name = n.input[2]
+                            break
+            
+            # If bias was found, create new input list with only what we need
+            if bias_name is not None:
+                new_inputs = []
+                
+                # Keep upstream gradient and input
+                if len(inputs) >= 2:
+                    new_inputs.extend([inputs[0], inputs[1]])
+                
+                # Keep weight
+                if len(inputs) >= 3:
+                    new_inputs.append(inputs[2])
+                
+                # Add bias
+                new_inputs.append(bias_name)
+                
+                # Replace inputs
+                del node.input[:]
+                node.input.extend(new_inputs)
+            else:
+                print(f"Warning: Bias input could not be found for node {node.name}")
+    
+    # Save the modified model
+    onnx.save(model, output_path)
+    print(f"Modified model saved to {output_path}")
