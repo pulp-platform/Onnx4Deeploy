@@ -4,7 +4,7 @@ import numpy as np
 import sys
 import os
 import torch
-from CCT.cct import cct_test  
+from CCT.cct import *
 from utils.utils import *
 
 def generate_cct_onnx_and_data(save_path=None):
@@ -25,15 +25,17 @@ def generate_cct_onnx_and_data(save_path=None):
 
     os.makedirs(base_path, exist_ok=True)
 
-    model = cct_test(
-        pretrained=pretrained, 
-        img_size=img_size, 
-        num_classes=num_classes, 
-        embedding_dim=embedding_dim, 
-        num_heads=num_heads,  
-        num_layers=num_layers,
-        n_conv_layers=2  
-    )
+    # model = cct_test(
+    #     pretrained=pretrained, 
+    #     img_size=img_size, 
+    #     num_classes=num_classes, 
+    #     embedding_dim=embedding_dim, 
+    #     num_heads=num_heads,  
+    #     num_layers=num_layers,
+    #     n_conv_layers=2  
+    # )
+
+    model = cct_2_3x2_32();
     model.eval()
     model = randomize_layernorm_params(model)
 
@@ -63,6 +65,12 @@ def generate_cct_onnx_and_data(save_path=None):
 
     np.savez(output_file, output=output_data)
     print(f"✅ Output data saved to {output_file}")
+
+    optimize_matrix_operations(onnx_file, onnx_file)
+    print(f"✅ Successfully optimized matrix operations. Saved as {onnx_file}")
+
+    unify_gemm_input_dims(onnx_file, onnx_file)
+    print(f"✅ Successfully unified GEMM input dimensions. Saved as {onnx_file}")
 
 if __name__ == "__main__":
     save_path = sys.argv[1] if len(sys.argv) > 1 else None

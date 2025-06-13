@@ -13,68 +13,411 @@ def add_c_to_gemm(input_model_path, output_model_path):
     
     for node in graph.node:
         if node.op_type == 'Gemm':
-
+            
             if len(node.input) == 2:
                 print(f"Find Gemm without C: {node.name}")
                 
                 input_a_name = node.input[0]
                 input_b_name = node.input[1]
                 
-    
                 b_shape = None
                 for init in graph.initializer:
                     if init.name == input_b_name:
                         b_tensor = numpy_helper.to_array(init)
                         b_shape = b_tensor.shape
                         break
-                
 
                 if b_shape is None:
                     for vi in graph.value_info:
                         if vi.name == input_b_name:
                             b_shape = [dim.dim_value for dim in vi.type.tensor_type.shape.dim]
                             break
-      
+
                 if b_shape is None:
                     output_name = node.output[0]
-                    for vi in graph.value_info + [graph.output[i] for i in range(len(graph.output))]:
+
+                    all_value_infos = list(graph.value_info) + list(graph.output)
+                    
+                    for vi in all_value_infos:
                         if vi.name == output_name:
-                            output_shape = [dim.dim_value for dim in vi.type.tensor_type.shape.dim]
-                          
-                            transB = 0
-                            for attr in node.attribute:
-                                if attr.name == 'transB' and attr.i == 1:
-                                    transB = 1
-                            
-                         
-                            c_length = output_shape[-1]
-                            b_shape = [c_length, 0] if transB == 0 else [0, c_length]
+          
+                            if vi.type.tensor_type.shape.dim:
+                                output_shape = [dim.dim_value for dim in vi.type.tensor_type.shape.dim]
+                                
+                           
+                                if output_shape and all(output_shape): 
+                                    transB = 0
+                                    for attr in node.attribute:
+                                        if attr.name == 'transB' and attr.i == 1:
+                                            transB = 1
+                                    
+                                    c_length = output_shape[-1]
+                                    b_shape = [c_length, 0] if transB == 0 else [0, c_length]
                             break
                 
-                if b_shape is not None:
-        
+
+                if b_shape is not None and len(b_shape) >= 2 and (b_shape[0] > 0 or b_shape[1] > 0):
+                    
                     transB = 0
                     for attr in node.attribute:
                         if attr.name == 'transB' and attr.i == 1:
                             transB = 1
                     
-                    c_shape = [b_shape[1]] if not transB else [b_shape[0]]
-       
+      
+                    if transB == 0 and b_shape[1] > 0:
+                        c_shape = [b_shape[1]]
+                    elif transB == 1 and b_shape[0] > 0:
+                        c_shape = [b_shape[0]]
+                    else:
+                        print(f"Warning: Invalid shape {b_shape} for {node.name}, pass this node.")
+                        continue
+                    
                     c_tensor = np.zeros(c_shape, dtype=np.float32)
                     c_name = f"{node.name}_c_bias"
                     
                     c_initializer = numpy_helper.from_array(c_tensor, name=c_name)
                     graph.initializer.append(c_initializer)
                     
-                  
                     node.input.append(c_name)
                     print(f"Add C: {c_name}, Shape: {c_shape}")
                 else:
-                    print(f"Warning: Cannot find {node.name} shape, pass this node.")
+                    print(f"Warning: Cannot find valid shape for {node.name}, pass this node.")
     
-
     onnx.save(model, output_model_path)
     print(f"Saved to: {output_model_path}")
+
+def unify_gemm_input_dims(input_model_path, output_model_path):
+    """
+    统一GEMM节点的输入维度，避免名称冲突
+    """
+    model = onnx.load(input_model_path)
+    graph = model.graph
+    
+    print(f"Processing model: {input_model_path}")
+    
+    modified_nodes = 0
+    
+    # 跟踪所有现有名称，避免冲突
+    existing_names = set()
+    
+    # 收集所有现有名称
+    for init in graph.initializer:
+        existing_names.add(init.name)
+    
+    for vi in graph.value_info:
+        existing_names.add(vi.name)
+        
+    for inp in graph.input:
+        existing_names.add(inp.name)
+        
+    for out in graph.output:
+        existing_names.add(out.name)
+    
+    # 跟踪已经创建的reshaped版本，避免重复创建
+    reshaped_cache = {}  # original_name -> (target_shape, new_name)
+    
+    def generate_unique_name(base_name, existing_names):
+        """生成唯一名称"""
+        if base_name not in existing_names:
+            existing_names.add(base_name)
+            return base_name
+        
+        counter = 1
+        while f"{base_name}_{counter}" in existing_names:
+            counter += 1
+        
+        unique_name = f"{base_name}_{counter}"
+        existing_names.add(unique_name)
+        return unique_name
+    
+    def get_or_create_reshaped_initializer(initializer, target_shape, existing_names, reshaped_cache):
+        """获取或创建reshaped的initializer，避免重复"""
+        
+        cache_key = (initializer.name, tuple(target_shape))
+        
+        # 检查缓存
+        if cache_key in reshaped_cache:
+            print(f"  Reusing cached reshaped initializer: {reshaped_cache[cache_key]}")
+            return reshaped_cache[cache_key]
+        
+        # 创建新的reshaped initializer
+        data = numpy_helper.to_array(initializer)
+        data_reshaped = data.reshape(target_shape)
+        
+        # 生成唯一名称
+        base_name = f"{initializer.name}_reshaped"
+        new_name = generate_unique_name(base_name, existing_names)
+        
+        new_initializer = numpy_helper.from_array(data_reshaped, name=new_name)
+        
+        # 添加到图中
+        graph.initializer.append(new_initializer)
+        
+        # 缓存结果
+        reshaped_cache[cache_key] = new_name
+        
+        print(f"  Created reshaped initializer: {initializer.name} -> {new_name}")
+        print(f"  Shape: {list(data.shape)} -> {target_shape}")
+        
+        return new_name
+
+    for node in graph.node:
+        if node.op_type == 'Gemm':
+            print(f"\nProcessing Gemm node: {node.name}")
+            
+            if len(node.input) < 2:
+                print(f"Warning: Gemm node {node.name} has less than 2 inputs, skipping.")
+                continue
+            
+            input_a_name = node.input[0]
+            input_b_name = node.input[1]
+            
+            # 获取输入A的形状
+            a_shape = None
+            a_initializer = None
+            for init in graph.initializer:
+                if init.name == input_a_name:
+                    a_tensor = numpy_helper.to_array(init)
+                    a_shape = list(a_tensor.shape)
+                    a_initializer = init
+                    break
+                    
+            if a_shape is None:
+                all_value_infos = list(graph.value_info) + list(graph.input)
+                for vi in all_value_infos:
+                    if vi.name == input_a_name:
+                        a_shape = [dim.dim_value for dim in vi.type.tensor_type.shape.dim]
+                        break
+            
+            # 获取输入B的形状
+            b_shape = None
+            b_initializer = None
+            for init in graph.initializer:
+                if init.name == input_b_name:
+                    b_tensor = numpy_helper.to_array(init)
+                    b_shape = list(b_tensor.shape)
+                    b_initializer = init
+                    break
+                    
+            if b_shape is None:
+                all_value_infos = list(graph.value_info) + list(graph.input)
+                for vi in all_value_infos:
+                    if vi.name == input_b_name:
+                        b_shape = [dim.dim_value for dim in vi.type.tensor_type.shape.dim]
+                        break
+            
+            if a_shape is None or b_shape is None:
+                print(f"Warning: Cannot determine shapes for {node.name}, skipping.")
+                continue
+            
+            print(f"Original shapes - A: {a_shape}, B: {b_shape}")
+            
+            # 获取transpose属性
+            transA = 0
+            transB = 0
+            for attr in node.attribute:
+                if attr.name == 'transA' and attr.i == 1:
+                    transA = 1
+                if attr.name == 'transB' and attr.i == 1:
+                    transB = 1
+            
+            max_dim = max(len(a_shape), len(b_shape))
+            
+            # 处理输入B的维度统一
+            if b_initializer is not None and len(b_shape) != max_dim:
+                dim_diff = max_dim - len(b_shape)
+                if dim_diff > 0:
+                    new_shape = tuple([1] * dim_diff + list(b_shape))
+                    
+                    # 使用缓存机制获取或创建reshaped版本
+                    new_b_name = get_or_create_reshaped_initializer(
+                        b_initializer, new_shape, existing_names, reshaped_cache
+                    )
+                    
+                    # 更新节点输入
+                    node.input[1] = new_b_name
+                    modified_nodes += 1
+            
+            # 处理输入A的维度统一
+            if a_initializer is not None and len(a_shape) != max_dim:
+                dim_diff = max_dim - len(a_shape)
+                if dim_diff > 0:
+                    new_shape = tuple([1] * dim_diff + list(a_shape))
+                    
+                    # 使用缓存机制获取或创建reshaped版本
+                    new_a_name = get_or_create_reshaped_initializer(
+                        a_initializer, new_shape, existing_names, reshaped_cache
+                    )
+                    
+                    # 更新节点输入
+                    node.input[0] = new_a_name
+                    modified_nodes += 1
+
+    onnx.save(model, output_model_path)
+    print(f"\nModified {modified_nodes} Gemm nodes")
+    print(f"Created {len(reshaped_cache)} unique reshaped initializers")
+    print(f"Saved to: {output_model_path}")
+    
+    return modified_nodes
+
+def optimize_matrix_operations(input_model_path, output_model_path):
+    """
+    Optimize matrix operations in ONNX model:
+    1. Fuse MatMul+Add into GEMM
+    2. Add missing C tensor to GEMM operations with only A and B inputs
+    
+    Args:
+        input_model_path: Path to the input model
+        output_model_path: Path to save the optimized model
+    """
+    model = onnx.load(input_model_path)
+    graph = model.graph
+    
+    # Create maps for node traversal
+    output_map = {}  # Map output tensor names to their producing nodes
+    input_map = {}   # Map input tensor names to nodes consuming them
+    
+    for node in graph.node:
+        for output in node.output:
+            output_map[output] = node
+        
+        for input_name in node.input:
+            if input_name not in input_map:
+                input_map[input_name] = []
+            input_map[input_name].append(node)
+    
+    # === PASS 1: Fuse MatMul+Add to GEMM ===
+    nodes_to_remove = []
+    nodes_to_add = []
+    
+    for node in graph.node:
+        if node.op_type == 'MatMul':
+            matmul_node = node
+            matmul_output = matmul_node.output[0]
+            
+            # Check if this MatMul's output is used by exactly one Add node
+            if matmul_output in input_map and len(input_map[matmul_output]) == 1:
+                next_node = input_map[matmul_output][0]
+                
+                if next_node.op_type == 'Add':
+                    add_node = next_node
+                    
+                    # Get MatMul inputs
+                    a_name = matmul_node.input[0]
+                    b_name = matmul_node.input[1]
+                    
+                    # Get Add bias input
+                    if add_node.input[0] == matmul_output:
+                        c_name = add_node.input[1]
+                    else:
+                        c_name = add_node.input[0]
+                    
+                    # Create new GEMM node
+                    gemm_node = onnx.helper.make_node(
+                        'Gemm',
+                        inputs=[a_name, b_name, c_name],
+                        outputs=[add_node.output[0]],
+                        name=f"{matmul_node.name}_fused_with_{add_node.name}"
+                    )
+                    
+                    # Add GEMM node attributes
+                    alpha_attr = onnx.helper.make_attribute('alpha', 1.0)
+                    beta_attr = onnx.helper.make_attribute('beta', 1.0)
+                    gemm_node.attribute.append(alpha_attr)
+                    gemm_node.attribute.append(beta_attr)
+                    
+                    # Mark nodes for removal and addition
+                    nodes_to_remove.append(matmul_node)
+                    nodes_to_remove.append(add_node)
+                    nodes_to_add.append(gemm_node)
+                    
+                    print(f"Fusing MatMul {matmul_node.name} and Add {add_node.name} into GEMM {gemm_node.name}")
+    
+    # Apply the changes from Pass 1
+    for node in nodes_to_remove:
+        if node in graph.node:  # Check if node is still in graph
+            graph.node.remove(node)
+    
+    for node in nodes_to_add:
+        graph.node.append(node)
+    
+    # === PASS 2: Add missing C tensor to GEMM operations ===
+    for node in graph.node:
+        if node.op_type == 'Gemm' and len(node.input) == 2:
+            print(f"Find Gemm without C: {node.name}")
+            
+            input_a_name = node.input[0]
+            input_b_name = node.input[1]
+            
+            # Try to get B shape from initializer
+            b_shape = None
+            for init in graph.initializer:
+                if init.name == input_b_name:
+                    b_tensor = numpy_helper.to_array(init)
+                    b_shape = b_tensor.shape
+                    break
+            
+            # If not found, try to get from value_info
+            if b_shape is None:
+                for vi in graph.value_info:
+                    if vi.name == input_b_name:
+                        b_shape = [dim.dim_value for dim in vi.type.tensor_type.shape.dim]
+                        break
+            
+            # If still not found, try to infer from output shape
+            if b_shape is None:
+                output_name = node.output[0]
+                all_value_infos = list(graph.value_info) + list(graph.output)
+                
+                for vi in all_value_infos:
+                    if vi.name == output_name:
+                        # Ensure we have dimension info
+                        if vi.type.tensor_type.shape.dim:
+                            output_shape = [dim.dim_value for dim in vi.type.tensor_type.shape.dim]
+                            
+                            # Check if output_shape has enough elements
+                            if output_shape and all(output_shape):
+                                transB = 0
+                                for attr in node.attribute:
+                                    if attr.name == 'transB' and attr.i == 1:
+                                        transB = 1
+                                
+                                c_length = output_shape[-1]
+                                b_shape = [c_length, 0] if transB == 0 else [0, c_length]
+                        break
+            
+            # If we successfully got shape info, add C tensor
+            if b_shape is not None and len(b_shape) >= 2 and (b_shape[0] > 0 or b_shape[1] > 0):
+                transB = 0
+                for attr in node.attribute:
+                    if attr.name == 'transB' and attr.i == 1:
+                        transB = 1
+                
+                # Ensure we get valid shapes
+                if transB == 0 and b_shape[1] > 0:
+                    c_shape = [b_shape[1]]
+                elif transB == 1 and b_shape[0] > 0:
+                    c_shape = [b_shape[0]]
+                else:
+                    print(f"Warning: Invalid shape {b_shape} for {node.name}, skip this node.")
+                    continue
+                
+                c_tensor = np.zeros(c_shape, dtype=np.float32)
+                c_name = f"{node.name}_c_bias"
+                
+                c_initializer = numpy_helper.from_array(c_tensor, name=c_name)
+                graph.initializer.append(c_initializer)
+                
+                node.input.append(c_name)
+                print(f"Add C: {c_name}, Shape: {c_shape}")
+            else:
+                print(f"Warning: Cannot find valid shape for {node.name}, skip this node.")
+    
+    # Save the optimized model
+    onnx.save(model, output_model_path)
+    print(f"Model optimized and saved to: {output_model_path}")
+    return model
+
 
 def replace_biasgelu_with_gelu_add(input_model_path, output_model_path):
  
@@ -511,6 +854,10 @@ def run_optmization_remove_biasgelu(onnx_train_file, onnx_out_file):
     new_nodes = []
     replaced_count = 0
     
+    # Keep track of used initializers
+    used_initializers = set()
+    new_initializers = []
+    
     # Process all nodes
     for node in graph.node:
         if node.op_type == "BiasGelu":
@@ -524,10 +871,38 @@ def run_optmization_remove_biasgelu(onnx_train_file, onnx_out_file):
             # Create intermediate tensor name
             intermediate_output = f"{X}_add_bias"
             
-            # Create Add node
+            # Create a new unique bias name to avoid sharing
+            new_bias_name = f"{Bias}_{node.name}"
+            
+            # Find the original bias initializer
+            bias_initializer = None
+            for initializer in graph.initializer:
+                if initializer.name == Bias:
+                    bias_initializer = initializer
+                    break
+            
+            # Create a copy of the bias initializer with a new name if found
+            if bias_initializer is not None:
+                new_bias = onnx.helper.make_tensor(
+                    name=new_bias_name,
+                    data_type=bias_initializer.data_type,
+                    dims=bias_initializer.dims,
+                    vals=bias_initializer.raw_data if bias_initializer.raw_data else 
+                          bias_initializer.float_data or bias_initializer.int32_data or 
+                          bias_initializer.int64_data or bias_initializer.uint64_data,
+                    raw=bool(bias_initializer.raw_data)
+                )
+                new_initializers.append(new_bias)
+                used_initializers.add(Bias)
+            else:
+                # If we can't find the initializer, it might be an input or value_info
+                # In this case, we should keep the original bias name
+                new_bias_name = Bias
+            
+            # Create Add node with the new bias
             add_node = helper.make_node(
                 "Add",
-                inputs=[X, Bias],
+                inputs=[X, new_bias_name],
                 outputs=[intermediate_output],
                 name=f"{node.name}_Add",
             )
@@ -574,10 +949,15 @@ def run_optmization_remove_biasgelu(onnx_train_file, onnx_out_file):
             # Keep other nodes unchanged
             new_nodes.append(node)
     
+    # Add the new initializers to the graph
+    for initializer in new_initializers:
+        graph.initializer.append(initializer)
+    
     # Replace nodes in the graph
     graph.ClearField("node")
     graph.node.extend(new_nodes)
     
+    # Rest of the function remains the same...
     # Create a copy of the model for selective shape inference
     safe_model = copy.deepcopy(model)
     
@@ -637,6 +1017,78 @@ def run_optmization_remove_biasgelu(onnx_train_file, onnx_out_file):
         print("⚠️ No BiasGelu nodes were replaced.")
     
     return model
+
+def run_optmization_remove_biasgelugrad(onnx_train_file, onnx_out_file):
+    """
+    Optimize ONNX model:
+    1. Convert BiasGeluGrad_dX nodes to GeluGrad nodes
+    2. Remove bias input (input 2)
+    3. Delete subsequent ReduceSum nodes
+    
+    Args:
+        onnx_train_file: Input ONNX model path
+        onnx_out_file: Output ONNX model path
+    """
+    # Load ONNX model
+    model = onnx.load(onnx_train_file)
+    graph = model.graph
+    modified_model = copy.deepcopy(model)
+    modified_graph = modified_model.graph
+    
+    # Track nodes to be removed
+    nodes_to_remove = set()
+    
+    # Map original output names to new output names
+    output_mapping = {}
+    
+    # First pass: identify BiasGeluGrad_dX nodes and corresponding ReduceSum nodes
+    for i, node in enumerate(graph.node):
+        if node.op_type == "BiasGeluGrad_dX" or (
+            node.domain == "com.microsoft" and 
+            "BiasGeluGrad_dX" in node.name
+        ):
+            # Create new GeluGrad node
+            new_inputs = [node.input[0], node.input[1]]  # Remove bias input (input[2])
+            new_node = helper.make_node(
+                "GeluGrad",
+                inputs=new_inputs,
+                outputs=[node.output[0]],
+                name=f"GeluGrad_{i}"
+            )
+            
+            # Replace BiasGeluGrad_dX node with new GeluGrad node
+            modified_graph.node.remove(modified_graph.node[i])
+            modified_graph.node.insert(i, new_node)
+            
+            # Check for ReduceSum nodes that take this node's output as input
+            for j, next_node in enumerate(graph.node):
+                if next_node.op_type == "ReduceSum" and node.output[0] in next_node.input:
+                    nodes_to_remove.add(j)
+                    # Map ReduceSum output to new node output
+                    output_mapping[next_node.output[0]] = node.output[0]
+    
+    # Second pass: remove identified ReduceSum nodes
+    reduced_nodes = []
+    for i, node in enumerate(modified_graph.node):
+        if i not in nodes_to_remove:
+            # Update inputs that reference outputs of removed nodes
+            for j, input_name in enumerate(node.input):
+                if input_name in output_mapping:
+                    node.input[j] = output_mapping[input_name]
+            reduced_nodes.append(node)
+    
+    # Replace nodes in the graph
+    del modified_graph.node[:]
+    modified_graph.node.extend(reduced_nodes)
+    
+    # Update model outputs if needed
+    for output in modified_graph.output:
+        if output.name in output_mapping:
+            output.name = output_mapping[output.name]
+    
+    # Save modified model
+    onnx.save(modified_model, onnx_out_file)
+    print(f"Optimized model saved to {onnx_out_file}")
 
 def optimize_reshape_fusion(input_model_path: str, output_model_path: str) -> None:
     """
@@ -1065,11 +1517,17 @@ def convert_reducesum_axes_to_attr(input_file: str, output_file: str):
     print(f"Model converted and saved to: {output_file}")
 
 
+import onnx
+import numpy as np
+import hashlib
+import re
+from onnx import helper, numpy_helper
+
 def convert_fusedmatmul_to_gemm(input_model_path, output_model_path):
     """
     Convert Microsoft's FusedMatMul nodes to standard Gemm nodes in an ONNX model.
-    This function handles custom ops and adds a zero tensor for the C input of Gemm when needed.
-    The three inputs to Gemm will be named A, B, and C in the function implementation.
+    Enhanced with complex naming strategy to prevent any naming conflicts.
+    Names are encoded with input/output information and unique identifiers.
     
     Args:
         input_model_path: Path to the input ONNX model
@@ -1082,10 +1540,153 @@ def convert_fusedmatmul_to_gemm(input_model_path, output_model_path):
     new_nodes = []
     new_initializers = []
     
+    # Keep track of all existing names to avoid conflicts
+    existing_names = set()
+    
+    # Collect all existing names from the model
+    def collect_existing_names():
+        for node in model.graph.node:
+            if node.name:
+                existing_names.add(node.name)
+            for output in node.output:
+                existing_names.add(output)
+        
+        for init in model.graph.initializer:
+            existing_names.add(init.name)
+        
+        for vi in model.graph.value_info:
+            existing_names.add(vi.name)
+        
+        for inp in model.graph.input:
+            existing_names.add(inp.name)
+        
+        for out in model.graph.output:
+            existing_names.add(out.name)
+    
+    collect_existing_names()
+    
+    def sanitize_name(name):
+        """Clean name for use in identifiers"""
+        # Remove special characters and replace with underscores
+        sanitized = re.sub(r'[^a-zA-Z0-9_]', '_', name)
+        # Remove multiple consecutive underscores
+        sanitized = re.sub(r'_+', '_', sanitized)
+        # Remove leading/trailing underscores
+        sanitized = sanitized.strip('_')
+        return sanitized[:50]  # Limit length
+    
+    def encode_inputs_outputs(inputs, outputs):
+        """Create a unique hash from inputs and outputs"""
+        # Combine all input and output names
+        combined = '|'.join(inputs + outputs)
+        # Create a short hash
+        hash_obj = hashlib.md5(combined.encode())
+        return hash_obj.hexdigest()[:8]
+    
+    def create_enhanced_name(base_name, inputs, outputs, node_index, name_type="node"):
+        """Create an enhanced name with input/output encoding"""
+        
+        # 1. Sanitize base name
+        clean_base = sanitize_name(base_name) if base_name else f"auto_{name_type}"
+        
+        # 2. Create input signature
+        input_sig = "_".join([sanitize_name(inp)[:15] for inp in inputs[:2]])  # First 2 inputs
+        
+        # 3. Create output signature  
+        output_sig = "_".join([sanitize_name(out)[:15] for out in outputs[:2]])  # First 2 outputs
+        
+        # 4. Create hash of all inputs/outputs
+        io_hash = encode_inputs_outputs(inputs, outputs)
+        
+        # 5. Combine everything
+        enhanced_name = f"{clean_base}_i{input_sig}_o{output_sig}_h{io_hash}_n{node_index}"
+        
+        # 6. Ensure uniqueness
+        return generate_absolutely_unique_name(enhanced_name, existing_names)
+    
+    def generate_absolutely_unique_name(base_name, existing_names):
+        """Generate a globally unique name with fallback strategies"""
+        if base_name not in existing_names:
+            existing_names.add(base_name)
+            return base_name
+        
+        # Strategy 1: Add counter
+        for counter in range(1, 1000):
+            candidate = f"{base_name}_v{counter}"
+            if candidate not in existing_names:
+                existing_names.add(candidate)
+                return candidate
+        
+        # Strategy 2: Add timestamp-like suffix
+        import time
+        timestamp_suffix = str(int(time.time() * 1000000))[-8:]  # Last 8 digits
+        candidate = f"{base_name}_t{timestamp_suffix}"
+        if candidate not in existing_names:
+            existing_names.add(candidate)
+            return candidate
+        
+        # Strategy 3: Add random suffix (fallback)
+        import random
+        for _ in range(100):
+            random_suffix = ''.join(random.choices('0123456789abcdef', k=8))
+            candidate = f"{base_name}_r{random_suffix}"
+            if candidate not in existing_names:
+                existing_names.add(candidate)
+                return candidate
+        
+        # Final fallback
+        raise RuntimeError(f"Unable to generate unique name for: {base_name}")
+    
+    def infer_tensor_shape(tensor_name):
+        """Infer shape of a tensor from model info"""
+        # Check value_info
+        for vi in model.graph.value_info:
+            if vi.name == tensor_name:
+                return [dim.dim_value for dim in vi.type.tensor_type.shape.dim]
+        
+        # Check initializers
+        for init in model.graph.initializer:
+            if init.name == tensor_name:
+                return list(init.dims)
+        
+        # Check graph inputs
+        for inp in model.graph.input:
+            if inp.name == tensor_name:
+                return [dim.dim_value for dim in inp.type.tensor_type.shape.dim]
+        
+        return None
+    
+    def create_enhanced_bias_tensor(original_node, inputs, outputs, node_index, target_shape):
+        """Create a bias tensor with enhanced naming"""
+        
+        # Create enhanced name for bias
+        bias_base_name = f"{original_node.name}_zero_bias" if original_node.name else "auto_bias"
+        
+        bias_name = create_enhanced_name(
+            bias_base_name,
+            inputs,
+            outputs + [f"bias_for_{outputs[0]}"],  # Include bias info in outputs
+            node_index,
+            "bias"
+        )
+        
+        # Create zero tensor
+        zero_tensor = numpy_helper.from_array(
+            np.zeros(target_shape, dtype=np.float32),
+            name=bias_name
+        )
+        
+        return zero_tensor, bias_name
+    
     # Process each node in the graph
-    for node in model.graph.node:
+    fusedmatmul_count = 0
+    
+    for node_index, node in enumerate(model.graph.node):
         # Check if the node is a FusedMatMul from Microsoft domain
         if node.op_type == "FusedMatMul" and node.domain == "com.microsoft":
+            fusedmatmul_count += 1
+            print(f"Converting FusedMatMul node {fusedmatmul_count}: {node.name}")
+            
             # Extract attributes from FusedMatMul
             alpha = 1.0
             transA = 0
@@ -1100,72 +1701,88 @@ def convert_fusedmatmul_to_gemm(input_model_path, output_model_path):
                     transB = attr.i
             
             # Get inputs and output of FusedMatMul
-            # In our implementation, we'll call these A and B
             A = node.input[0]
-            B = node.input[1]
-            output = node.output[0]
+            B = node.input[1] if len(node.input) > 1 else ""
+            output = node.output[0] if node.output else f"auto_output_{node_index}"
             
-            # Create a name for the zero tensor (C input for Gemm)
-            C = f"{output}_zero_bias"
+            print(f"  Input A: {A}")
+            print(f"  Input B: {B}")
+            print(f"  Output: {output}")
+            print(f"  Attributes: alpha={alpha}, transA={transA}, transB={transB}")
             
-            # To determine the shape of C, we need to find the output shape
-            # For this, we need to analyze the graph and infer shapes
+            # Infer shapes for bias creation
+            a_shape = infer_tensor_shape(A)
+            b_shape = infer_tensor_shape(B)
             
-            a_shape = None
-            b_shape = None
+            print(f"  Inferred shapes: A={a_shape}, B={b_shape}")
             
-            # Try to find shapes from value_info or initializers
-            for vi in model.graph.value_info:
-                if vi.name == A:
-                    a_shape = [dim.dim_value for dim in vi.type.tensor_type.shape.dim]
-                elif vi.name == B:
-                    b_shape = [dim.dim_value for dim in vi.type.tensor_type.shape.dim]
-            
-            # Check initializers if shapes not found in value_info
-            if a_shape is None or b_shape is None:
-                for init in model.graph.initializer:
-                    if init.name == A:
-                        a_shape = list(init.dims)
-                    elif init.name == B:
-                        b_shape = list(init.dims)
-            
-            # If we couldn't determine exact shapes, use a placeholder approach
+            # Calculate bias shape
             if a_shape and b_shape:
-                # Calculate output shape based on MatMul rules and transA/transB
-                if transA:
-                    a_shape = a_shape[::-1]
-                if transB:
-                    b_shape = b_shape[::-1]
+                # Apply transpose if needed
+                effective_a_shape = a_shape[::-1] if transA else a_shape
+                effective_b_shape = b_shape[::-1] if transB else b_shape
                 
-                # For matmul: [M,K] * [K,N] = [M,N]
-                # The bias/C needs to be shape [N]
-                c_shape = [b_shape[-1]]
+                # For matmul: [M,K] * [K,N] = [M,N], bias needs shape [N]
+                if len(effective_b_shape) >= 2:
+                    c_shape = [effective_b_shape[-1]]
+                elif len(effective_b_shape) == 1:
+                    c_shape = [effective_b_shape[0]]
+                else:
+                    c_shape = [1]  # Fallback
             else:
-                # If we can't determine shapes, we'll add a placeholder initializer
-                c_shape = [1]  # Placeholder
+                c_shape = [1]  # Safe fallback
             
-            # Create a zero tensor for C input
-            zero_tensor = numpy_helper.from_array(
-                np.zeros(c_shape, dtype=np.float32),
-                name=C
+            print(f"  Calculated bias shape: {c_shape}")
+            
+            # Create enhanced bias tensor
+            bias_tensor, bias_name = create_enhanced_bias_tensor(
+                node, 
+                [A, B], 
+                [output], 
+                node_index, 
+                c_shape
             )
-            new_initializers.append(zero_tensor)
+            new_initializers.append(bias_tensor)
+            
+            print(f"  Created bias tensor: {bias_name}")
+            
+            # Create enhanced Gemm node name
+            gemm_node_name = create_enhanced_name(
+                node.name or "fusedmatmul_to_gemm",
+                [A, B, bias_name],
+                [output],
+                node_index,
+                "gemm"
+            )
             
             # Create the Gemm node
             gemm_node = helper.make_node(
                 "Gemm",
-                inputs=[A, B, C],  # Using A, B, C naming convention
+                inputs=[A, B, bias_name],
                 outputs=[output],
-                name=f"{node.name}_gemm",
+                name=gemm_node_name,
                 alpha=alpha,
-                beta=1.0,  # Standard beta value
+                beta=1.0,
                 transA=transA,
                 transB=transB
             )
             
             new_nodes.append(gemm_node)
+            
+            print(f"  -> Created Gemm node: {gemm_node_name}")
+            print(f"     Inputs: [{A}, {B}, {bias_name}]")
+            print(f"     Output: [{output}]")
+            print("")
+            
         else:
-            # Keep other nodes as they are
+            # Keep other nodes as they are, but ensure their names are unique
+            if node.name:
+                # Ensure node name is unique
+                unique_node_name = generate_absolutely_unique_name(node.name, existing_names)
+                if unique_node_name != node.name:
+                    print(f"Renamed node: {node.name} -> {unique_node_name}")
+                    node.name = unique_node_name
+            
             new_nodes.append(node)
     
     # Create a new graph with updated nodes and initializers
@@ -1179,10 +1796,9 @@ def convert_fusedmatmul_to_gemm(input_model_path, output_model_path):
     )
     
     # Create a new model with the updated graph
-    # Preserve opset imports and other model metadata
     new_model = helper.make_model(
         new_graph,
-        producer_name="FusedMatMul2Gemm",
+        producer_name="EnhancedFusedMatMul2Gemm",
         opset_imports=model.opset_import,
         ir_version=model.ir_version
     )
@@ -1196,9 +1812,18 @@ def convert_fusedmatmul_to_gemm(input_model_path, output_model_path):
 
     # Save the new model
     onnx.save(new_model, output_model_path)
-    print(f"Converted model saved to {output_model_path}")
+    
+    print(f"="*60)
+    print(f"✅ Conversion Summary:")
+    print(f"   - Converted {fusedmatmul_count} FusedMatMul nodes to Gemm")
+    print(f"   - Added {len(new_initializers)} new bias tensors")
+    print(f"   - Enhanced naming prevents conflicts")
+    print(f"   - Saved to: {output_model_path}")
+    print(f"="*60)
     
     return new_model
+
+
 
 def convert_sum_to_add(input_model_path, output_model_path):
     """

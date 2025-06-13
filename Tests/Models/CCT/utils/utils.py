@@ -160,11 +160,8 @@ def load_train_config(config_filename="../config.yaml"):
     
 
 def run_train_onnx_optimization(onnx_train_file, onnx_output_file):
-    # remove the second output of maxpool
-    print(f"🔹 Running optimization for {onnx_train_file}...")
 
-    run_optmization_remove_biasgelu(onnx_train_file, onnx_train_file)
-    print(f"✅ Successfully removed BiasGeluFusion. Saved as {onnx_train_file}")
+    print(f"🔹 Running optimization for {onnx_train_file}...")
 
     fix_layernorm_output(onnx_train_file, onnx_train_file)
     print(
@@ -230,6 +227,20 @@ def run_train_onnx_optimization(onnx_train_file, onnx_output_file):
         f"✅ Successfully processed LayerNormGrad nodes. Saved as {onnx_output_file}"
     )
     
+    run_optmization_remove_biasgelu(onnx_output_file, onnx_output_file)
+    print(f"✅ Successfully removed BiasGeluFusion. Saved as {onnx_output_file}")
+
+    run_optmization_remove_biasgelugrad(onnx_output_file, onnx_output_file)
+    print(
+        f"✅ Successfully removed BiasGeluGradFusion. Saved as {onnx_output_file}"
+    )
+    
+    optimize_matrix_operations(onnx_output_file, onnx_output_file)
+    print(f"✅ Successfully optimized matrix operations. Saved as {onnx_output_file}")
+
+    unify_gemm_input_dims(onnx_output_file, onnx_output_file)
+    print(f"✅ Successfully unified GEMM input dimensions. Saved as {onnx_output_file}")
+
     print_onnx_shapes(onnx_output_file)
 
 def rename_nodes(model_path, output_path):
@@ -337,6 +348,84 @@ def randomize_layernorm_params(model):
                 module.bias.data = module.bias.data + torch.randn_like(module.bias.data) * 1e-6
 
     return model
+
+def fix_shared_initializers_by_node_name(model_path, output_path):
+    """为每个bias添加使用它的节点名作为后缀，确保唯一性"""
+    
+    model = onnx.load(model_path)
+    
+    print("Fixing shared initializers by adding node names...")
+    
+    # 分析每个initializer被哪些节点使用
+    initializer_node_mapping = {}  # init_name -> [node_names]
+    
+    for init in model.graph.initializer:
+        init_name = init.name
+        using_nodes = []
+        
+        # 查找使用这个initializer的节点
+        for node in model.graph.node:
+            if init_name in node.input:
+                using_nodes.append(node.name)
+        
+        if len(using_nodes) > 1:
+            # 如果被多个节点使用，记录下来
+            initializer_node_mapping[init_name] = using_nodes
+            print(f"Initializer '{init_name}' is used by {len(using_nodes)} nodes:")
+            for node_name in using_nodes:
+                print(f"  - {node_name}")
+    
+    if not initializer_node_mapping:
+        print("No shared initializers detected. Nothing to fix.")
+        return False
+    
+    # 为每个共享的initializer的每次使用创建独立副本
+    new_initializers = []
+    processed_inits = set()
+    
+    for init in model.graph.initializer:
+        if init.name in initializer_node_mapping:
+            # 这是一个被多个节点共享的initializer
+            print(f"\nProcessing shared initializer: {init.name}")
+            processed_inits.add(init.name)
+            
+            # 为每个使用的节点创建独立副本
+            for node_name in initializer_node_mapping[init.name]:
+                # 创建新的initializer名称：原名_节点名
+                new_name = f"{init.name}_{node_name}"
+                
+                # 创建initializer的副本
+                import copy
+                new_init = copy.deepcopy(init)
+                new_init.name = new_name
+                new_initializers.append(new_init)
+                print(f"  Created copy for node '{node_name}': {init.name} -> {new_name}")
+        else:
+            # 普通initializer，直接保留
+            new_initializers.append(init)
+    
+    # 更新模型的initializer列表
+    del model.graph.initializer[:]
+    model.graph.initializer.extend(new_initializers)
+    
+    # 更新节点中的引用
+    print("\nUpdating node references...")
+    for node in model.graph.node:
+        for j, input_name in enumerate(node.input):
+            if input_name in processed_inits:
+                # 这个节点使用的是共享的initializer，更新为专用版本
+                old_name = input_name
+                new_name = f"{input_name}_{node.name}"
+                node.input[j] = new_name
+                print(f"  Node '{node.name}': {old_name} -> {new_name}")
+    
+    # 保存修复后的模型
+    onnx.save(model, output_path)
+    print(f"\nFixed model saved to: {output_path}")
+    
+    return True
+
+
 
 def randomize_onnx_initializers(model, seed=None, exclude_patterns=None):
     if seed is not None:

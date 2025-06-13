@@ -5,7 +5,7 @@ import os
 import sys
 import io
 import shutil
-from CCT.cct import cct_test
+from CCT.cct import *
 from onnxruntime.training import artifacts
 from utils.fixShape import * 
 from utils.utils import *
@@ -46,15 +46,16 @@ def generate_cct_training_onnx(save_path=None):
     onnx_train_optim = os.path.join(base_path, "network_train_optim.onnx")
 
     # Create CCT model and randomize layer norm parameters
-    model = cct_test(
-        pretrained=pretrained,
-        img_size=img_size,
-        num_classes=num_classes,
-        embedding_dim=embedding_dim,
-        num_heads=num_heads,
-        num_layers=num_layers,
-        n_conv_layers=2,
-    )
+    # model = cct_test(
+    #     pretrained=pretrained,
+    #     img_size=img_size,
+    #     num_classes=num_classes,
+    #     embedding_dim=embedding_dim,
+    #     num_heads=num_heads,
+    #     num_layers=num_layers,
+    #     n_conv_layers=2,
+    # )
+    model = cct_2_3x2_32()
     model.train()
     model = randomize_layernorm_params(model)
 
@@ -85,6 +86,7 @@ def generate_cct_training_onnx(save_path=None):
     onnx.save(onnx_model, onnx_infer_file)
     print(f"✅ Inference ONNX model saved to {onnx_infer_file}")
 
+    fix_shared_initializers_by_node_name(onnx_infer_file, onnx_infer_file)
     # Run optimization on the inference model
     rename_and_save_onnx(onnx_infer_file, onnx_infer_file)
     run_onnx_optimization(onnx_infer_file, embedding_dim, num_heads, input_shape)
@@ -95,11 +97,77 @@ def generate_cct_training_onnx(save_path=None):
     all_param_names = [init.name for init in onnx_model.graph.initializer]
     print(f" All Parameters: {all_param_names}")
 
-    # requires_grad = [name for name in all_param_names if name in [
-    # 'classifier_norm_bias', 'classifier_norm_weight', 'classifier_attention_pool_weight', 'classifier_attention_pool_bias', 'classifier_fc_weight', 'classifier_blocks_0_pre_norm_bias', 'classifier_fc_bias', 'node_0_classifier_attention_pool_Transpose__0'
-    # ]]
-    # requires_grad = [ name for name in all_param_names if "const" not in name]
-
+    # requires_grad = [
+    #     name
+    #     for name in all_param_names
+    #     if name
+    #     in [
+    #         "classifier_fc_weight",
+    #         "classifier_fc_bias",
+    #         "node_0_classifier_attention_pool_Transpose__0"
+    #         # "node_0_classifier_blocks_1_linear2_Transpose__0",
+    #         # "node_0_classifier_blocks_1_linear1_Transpose__0",
+    #         # "node_0_classifier_blocks_1_self_attn_proj_Transpose__0",
+    #         # "node_0_classifier_blocks_1_self_attn_k_proj_Transpose__0",
+    #         # "node_0_classifier_blocks_1_self_attn_q_proj_Transpose__0",
+    #         # " node_0_classifier_blocks_1_self_attn_v_proj_Transpose__0"
+    #     ]
+    # ]
+    print(f"parameter names: {all_param_names}")
+    # linear 
+    # "classifier_fc_weight",
+    # "classifier_fc_bias",
+    # LA
+            # "classifier_fc_weight",
+            # "classifier_fc_bias",
+            # "node_0_classifier_attention_pool_Transpose__0",
+            # "classifier_attention_pool_bias",
+            # "node_0_classifier_blocks_1_linear2_Transpose__0",
+            # "classifier_blocks_0_self_attn_proj_bias_Identity_31",
+            # "node_0_classifier_blocks_1_linear1_Transpose__0",
+            # "classifier_blocks_0_self_attn_proj_bias_Identity_33",
+            # "node_0_classifier_blocks_1_self_attn_proj_Transpose__0",
+            # "node_0_classifier_blocks_1_self_attn_v_proj_Transpose__0",
+            # "node_0_classifier_blocks_1_self_attn_k_proj_Transpose__0",
+            # "node_0_classifier_blocks_1_self_attn_q_proj_Transpose__0",
+            # L2A
+            #  "classifier_fc_weight",
+            # "classifier_fc_bias",
+            # "node_0_classifier_attention_pool_Transpose__0",
+            # "classifier_attention_pool_bias",
+            # "node_0_classifier_blocks_1_linear2_Transpose__0",
+            # "classifier_blocks_0_self_attn_proj_bias_Identity_31",
+            # "node_0_classifier_blocks_1_linear1_Transpose__0",
+            # "classifier_blocks_0_self_attn_proj_bias_Identity_33",
+            # "node_0_classifier_blocks_1_self_attn_proj_Transpose__0",
+            # "node_0_classifier_blocks_1_self_attn_v_proj_Transpose__0",
+            # "node_0_classifier_blocks_1_self_attn_k_proj_Transpose__0",
+            # "node_0_classifier_blocks_1_self_attn_q_proj_Transpose__0",
+            # "node_0_classifier_blocks_0_linear2_Transpose__0",
+            # "classifier_blocks_0_self_attn_proj_bias_Identity_34",
+            # "node_0_classifier_blocks_0_linear1_Transpose__0",
+            # "node_0_classifier_blocks_0_self_attn_proj_Transpose__0",
+            # "classifier_blocks_0_self_attn_proj_bias__classifier_blocks_0_self_attn_proj_Add",    
+            # "node_0_classifier_blocks_0_self_attn_k_proj_Transpose__0",        
+            # "node_0_classifier_blocks_0_self_attn_q_proj_Transpose__0",
+            # "node_0_classifier_blocks_0_self_attn_v_proj_Transpose__0",
+        # lora Block 1
+            #        "classifier_fc_weight",
+            # "classifier_fc_bias",
+            # "node_0_classifier_attention_pool_Transpose__0",
+            # "classifier_attention_pool_bias",
+            # "node_0_classifier_blocks_1_linear2_Transpose_1__0",
+            # "node_0_classifier_blocks_1_linear2_Transpose__0",
+            # "node_0_classifier_blocks_1_linear1_Transpose_1__0",
+            # "node_0_classifier_blocks_1_linear1_Transpose__0",
+            # "node_0_classifier_blocks_1_self_attn_Transpose_11__0",
+            # "node_0_classifier_blocks_1_self_attn_Transpose_10__0",
+            # "node_0_classifier_blocks_1_self_attn_Transpose_4__0",
+            # "node_0_classifier_blocks_1_self_attn_Transpose_3__0",
+            # "node_0_classifier_blocks_1_self_attn_Transpose__0",
+            # "node_0_classifier_blocks_1_self_attn_Transpose_1__0",
+            # "node_0_classifier_blocks_1_self_attn_Transpose_5__0",
+            # "node_0_classifier_blocks_1_self_attn_Transpose_6__0",
     requires_grad = [
         name
         for name in all_param_names
@@ -108,21 +176,74 @@ def generate_cct_training_onnx(save_path=None):
             "classifier_fc_weight",
             "classifier_fc_bias",
             "node_0_classifier_attention_pool_Transpose__0",
-            "node_0_classifier_blocks_1_linear2_Transpose__0"
+            "classifier_attention_pool_bias",
+            "node_0_classifier_blocks_1_linear2_Transpose_1__0",
+            "node_0_classifier_blocks_1_linear2_Transpose__0",
+            "node_0_classifier_blocks_1_linear1_Transpose_1__0",
+            "node_0_classifier_blocks_1_linear1_Transpose__0",
+            "node_0_classifier_blocks_1_self_attn_Transpose_11__0",
+            "node_0_classifier_blocks_1_self_attn_Transpose_10__0",
+            "node_0_classifier_blocks_1_self_attn_Transpose_4__0",
+            "node_0_classifier_blocks_1_self_attn_Transpose_3__0",
+            "node_0_classifier_blocks_1_self_attn_Transpose__0",
+            "node_0_classifier_blocks_1_self_attn_Transpose_1__0",
+            "node_0_classifier_blocks_1_self_attn_Transpose_5__0",
+            "node_0_classifier_blocks_1_self_attn_Transpose_6__0",
+            "node_0_classifier_blocks_0_linear2_Transpose_1__0",
+            "node_0_classifier_blocks_0_linear2_Transpose__0",
+            "node_0_classifier_blocks_0_linear1_Transpose_1__0",
+            "node_0_classifier_blocks_0_linear1_Transpose__0",
+            "node_0_classifier_blocks_0_self_attn_Transpose_11__0",
+            "node_0_classifier_blocks_0_self_attn_Transpose_10__0",
+            "node_0_classifier_blocks_0_self_attn_Transpose_4__0",
+            "node_0_classifier_blocks_0_self_attn_Transpose_3__0",
+            "node_0_classifier_blocks_0_self_attn_Transpose__0",
+            "node_0_classifier_blocks_0_self_attn_Transpose_1__0",
+            "node_0_classifier_blocks_0_self_attn_Transpose_5__0",
+            "node_0_classifier_blocks_0_self_attn_Transpose_6__0",
+            # "node_0_classifier_blocks_1_linear2_Transpose__0",
+            # "node_0_classifier_blocks_1_linear2_Transpose_1__0"
+            # "node_0_classifier_blocks_1_linear2_Transpose__0",
+            # "classifier_blocks_0_self_attn_proj_bias_Identity_31",
+            # "node_0_classifier_blocks_1_linear1_Transpose__0",
+            # "node_0_classifier_blocks_1_self_attn_Transpose_10__0",
+            # "node_0_classifier_blocks_1_self_attn_Transpose_11__0",
+            # "classifier_blocks_0_self_attn_proj_bias_Identity_33",
+            # "node_0_classifier_blocks_1_self_attn_proj_Transpose__0",
+            # "node_0_classifier_blocks_1_self_attn_v_proj_Transpose__0",
+            # "node_0_classifier_blocks_1_self_attn_k_proj_Transpose__0",
+            # "node_0_classifier_blocks_1_self_attn_q_proj_Transpose__0",
+            # "node_0_classifier_blocks_0_linear2_Transpose__0",
+            # "classifier_blocks_0_self_attn_proj_bias_Identity_34",
+            # "node_0_classifier_blocks_0_linear1_Transpose__0",
+            # "node_0_classifier_blocks_0_self_attn_proj_Transpose__0",
+            # "classifier_blocks_0_self_attn_proj_bias__classifier_blocks_0_self_attn_proj_Add",    
+            # "node_0_classifier_blocks_0_self_attn_k_proj_Transpose__0",        
+            # "node_0_classifier_blocks_0_self_attn_q_proj_Transpose__0",
+            # "node_0_classifier_blocks_0_self_attn_v_proj_Transpose__0",
+            # "node_0_classifier_blocks_1_linear1_Transpose__0",
+            # "classifier_blocks_0_self_attn_proj_bias_BiasGelu_token_8",
+            # "node_0_classifier_blocks_1_linear1_Transpose__0",
+            # "classifier_blocks_0_self_attn_proj_bias_BiasGelu_token_8",
+            # "node_0_classifier_blocks_1_self_attn_v_proj_Transpose__0",
+            # "node_0_classifier_blocks_1_self_attn_q_proj_Transpose__0",
+            # "node_0_classifier_blocks_1_self_attn_k_proj_Transpose__0"
+            # "node_0_classifier_blocks_1_linear2_Transpose__0",
+            # "node_0_classifier_blocks_1_linear1_Transpose__0",
+            # "node_0_classifier_blocks_1_self_attn_Transpose_10__0",
+            # "node_0_classifier_blocks_1_self_attn_Transpose_11__0",
+            # "node_0_classifier_blocks_1_self_attn_Transpose_3__0",
+            # "node_0_classifier_blocks_1_self_attn_Transpose_4__0"
+            # "node_0_classifier_blocks_1_self_attn_Transpose__0",
+            # " node_0_classifier_blocks_1_self_attn_Transpose_1__0",
+            # "node_0_classifier_blocks_1_self_attn_Transpose_5__0",
+            # "node_0_classifier_blocks_1_self_attn_Transpose_6__0"
+            # "node_0_classifier_blocks_1_self_attn_k_proj_Transpose__0",
+            # "node_0_classifier_blocks_1_self_attn_q_proj_Transpose__0",
+            # " node_0_classifier_blocks_1_self_attn_v_proj_Transpose__0"
         ]
     ]
-    # # requires_grad = [name for name in all_param_names if name in [
-    # 'classifier_fc_weight', 'classifier_fc_bias' ]]
-    # requires_grad = [name for name in all_param_names if name in [
-    # 'classifier_fc_weight', 'classifier_fc_bias']]
-
-    # requires_grad = [name for name in all_param_names if name in [
-    # 'node_0_classifier_blocks_0_linear1_Transpose__0', 'classifier_blocks_0_linear1_bias', 'node_0_classifier_blocks_0_linear2_Transpose__0'
-    # ]]
-    # requires_grad = [name for name in all_param_names if name in [
-    # 'node_0_classifier_blocks_0_self_attn_q_proj_Transpose__0', 'node_0_classifier_blocks_0_self_attn_k_proj_Transpose__0', 'node_0_classifier_blocks_0_self_attn_v_proj_Transpose__0',
-    # 'node_0_classifier_blocks_0_self_attn_proj_Transpose__0', 'classifier_blocks_0_self_attn_proj_bias', 'classifier_blocks_0_pre_norm_weight', 'classifier_blocks_0_pre_norm_bias', 'classifier_positional_emb'
-    # ]]
+ 
 
     frozen_params = [name for name in all_param_names if name not in requires_grad]
 
