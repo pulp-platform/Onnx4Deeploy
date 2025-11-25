@@ -1,0 +1,76 @@
+/* 图表切换按钮组 */
+.chart-toggle-group {
+    display: flex;
+    justify-content: center;
+    margin: 15px 0;
+    flex-wrap: wrap;
+}
+
+.chart-toggle-btn {
+    background-color: #f1f1f1;
+    border: 1px solid #ddd;
+    padding: 8px 12px;
+    margin: 0 5px;
+    border-radius: 4px;
+    cursor: pointer;
+    font-size: 13px;
+    transition: all 0.3s ease;
+}
+
+.chart-toggle-btn:hover {
+    background-color: #e0e0e0;
+}
+
+.chart-toggle-btn.active {
+    background-color: #4CAF50;
+    color: white;
+    border-color: #4CAF50;
+}
+
+/* 分布图特殊样式 */
+.distribution-chart .distribution-bar {
+    transition: all 0.3s ease;
+}
+
+.distribution-chart .distribution-bar:hover {
+    opacity: 0.8;
+}
+
+/* 叠加图表样式 */
+.stacked-chart .stacked-element {
+    transition: opacity 0.2s ease;
+}
+
+.stacked-chart:hover .stacked-element {
+    opacity: 0.7;
+}
+
+.stacked-chart:hover .stacked-element:hover {
+    opacity: 1;
+}
+
+/* 图表颜色标识 */
+.color-reference {
+    display: flex;
+    justify-content: center;
+    flex-wrap: wrap;
+    margin: 10px 0;
+    gap: 15px;
+}
+
+.color-item {
+    display: flex;
+    align-items: center;
+}
+
+.color-box {
+    width: 16px;
+    height: 16px;
+    border-radius: 3px;
+    margin-right: 6px;
+}
+
+.color-label {
+    font-size: 13px;
+    color: #555;
+}
