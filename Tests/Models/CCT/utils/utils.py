@@ -127,6 +127,12 @@ def run_onnx_optimization(onnx_file, embedding_dim, num_heads, input_shape):
     except subprocess.CalledProcessError as e:
         print(f"❌ Error during ONNX optimization: {e}")
 
+    # fuse_matmul_add_to_gemm(onnx_file, onnx_file)
+    # print(
+    #     f"✅ Successfully fused MatMul and Add to Gemm nodes. Saved as {onnx_file}"
+    # )
+    
+
 def load_config(config_filename="../config.yaml"):
     """Load and parse config.yaml, returning CCT-specific parameters in a single return statement."""
     # Resolve config.yaml relative to the script's location
@@ -163,30 +169,27 @@ def run_train_onnx_optimization(onnx_train_file, onnx_output_file):
 
     print(f"🔹 Running optimization for {onnx_train_file}...")
 
-    fix_layernorm_output(onnx_train_file, onnx_train_file)
+    fix_layernorm_output(onnx_train_file, onnx_output_file)
     print(
-        f"✅ Successfully fixed LayerNormalization opset version. Saved as {onnx_train_file}"
+        f"✅ Successfully fixed LayerNormalization opset version. Saved as {onnx_output_file}"
     )
-    optimize_softmax_axis(onnx_train_file, onnx_train_file)
+    optimize_softmax_axis(onnx_output_file, onnx_output_file)
     print(
-        f"✅ Successfully optimized Softmax axis. Saved as {onnx_train_file}")
+        f"✅ Successfully optimized Softmax axis. Saved as {onnx_output_file}")
 
-    optimize_reshape_fusion(onnx_train_file, onnx_train_file)
+    optimize_reshape_fusion(onnx_output_file, onnx_output_file)
     print(
         f"✅ Successfully optimized Reshape nodes. Saved as {onnx_output_file}")
 
-    modify_conflict_outputs(onnx_train_file, onnx_train_file)
+    modify_conflict_outputs(onnx_output_file, onnx_output_file)
     print(
         f"✅ Successfully removed all second outputs from Maxpool nodes. Saved as {onnx_output_file}"
     )
 
-    convert_squeeze_unsqueeze_input_to_attr(onnx_train_file, onnx_train_file)
+    convert_squeeze_unsqueeze_input_to_attr(onnx_output_file, onnx_output_file)
     print(
         f"✅ Successfully converted Squeeze inputs to attributes. Saved as {onnx_output_file}"
     )
-
-    add_c_to_gemm(onnx_train_file, onnx_output_file)
-    print(f"✅ Successfully added C to Gemm nodes. Saved as {onnx_output_file}")
 
     remove_identity_reducesum(onnx_output_file, onnx_output_file)
     print(
@@ -198,7 +201,7 @@ def run_train_onnx_optimization(onnx_train_file, onnx_output_file):
         f"✅ Successfully converted ReduceSum axes to attributes. Saved as {onnx_output_file}"
     )
 
-    convert_fusedmatmul_to_gemm(onnx_output_file, onnx_output_file)
+    convert_fusedmatmul_to_no_bias_gemm(onnx_output_file, onnx_output_file)
     print(
         f"✅ Successfully converted FusedMatMul to Gemm nodes. Saved as {onnx_output_file}"
     )
@@ -235,11 +238,23 @@ def run_train_onnx_optimization(onnx_train_file, onnx_output_file):
         f"✅ Successfully removed BiasGeluGradFusion. Saved as {onnx_output_file}"
     )
     
-    optimize_matrix_operations(onnx_output_file, onnx_output_file)
-    print(f"✅ Successfully optimized matrix operations. Saved as {onnx_output_file}")
 
-    unify_gemm_input_dims(onnx_output_file, onnx_output_file)
-    print(f"✅ Successfully unified GEMM input dimensions. Saved as {onnx_output_file}")
+    # unify_gemm_input_dims(onnx_output_file, onnx_output_file)
+    # print(f"✅ Successfully unified GEMM input dimensions. Saved as {onnx_output_file}")
+
+    fuse_matmul_add_to_gemm(onnx_output_file, onnx_output_file)
+    print(
+        f"✅ Successfully fused MatMul and Add to Gemm nodes. Saved as {onnx_output_file}"
+    )
+    process_onnx_model_name_with_type(onnx_output_file, onnx_output_file)
+    print(
+        f"✅ Successfully processed ONNX model name with type. Saved as {onnx_output_file}"
+    )
+
+    add_backward_markers_to_nodes(onnx_output_file, onnx_output_file)
+    print(
+        f"✅ Successfully added backward markers to nodes. Saved as {onnx_output_file}"
+    )
 
     print_onnx_shapes(onnx_output_file)
 
@@ -543,3 +558,133 @@ def type_inference(input_model_path, output_model_path):
     # Save the modified model
     onnx.save(model, output_model_path)
     print(f"Successfully saved type-inferred model to {output_model_path}")
+
+def ensure_all_tensor_shapes(model_path, output_path):
+    """
+    Ensure all tensors in the ONNX model have shape annotations.
+    This function infers shapes for missing tensors, especially gradient intermediates.
+    """
+    print("🔍 Checking and fixing tensor shapes...")
+    
+    # Load the model
+    onnx_model = onnx.load(model_path)
+    graph = onnx_model.graph
+    
+    # First, run standard shape inference
+    try:
+        onnx_model = onnx.shape_inference.infer_shapes(onnx_model)
+    except Exception as e:
+        print(f"⚠️  Standard shape inference warning: {e}")
+    
+    # Collect all tensor shapes from value_info
+    known_shapes = {}
+    
+    # Get shapes from inputs
+    for input_tensor in graph.input:
+        if input_tensor.type.tensor_type.HasField('shape'):
+            shape = [dim.dim_value if dim.HasField('dim_value') else -1 
+                    for dim in input_tensor.type.tensor_type.shape.dim]
+            known_shapes[input_tensor.name] = shape
+    
+    # Get shapes from outputs
+    for output_tensor in graph.output:
+        if output_tensor.type.tensor_type.HasField('shape'):
+            shape = [dim.dim_value if dim.HasField('dim_value') else -1 
+                    for dim in output_tensor.type.tensor_type.shape.dim]
+            known_shapes[output_tensor.name] = shape
+    
+    # Get shapes from value_info
+    for value_info in graph.value_info:
+        if value_info.type.tensor_type.HasField('shape'):
+            shape = [dim.dim_value if dim.HasField('dim_value') else -1 
+                    for dim in value_info.type.tensor_type.shape.dim]
+            known_shapes[value_info.name] = shape
+    
+    # Get shapes from initializers
+    for init in graph.initializer:
+        known_shapes[init.name] = list(init.dims)
+    
+    # Find all tensor names used in the graph
+    all_tensor_names = set()
+    for node in graph.node:
+        all_tensor_names.update(node.input)
+        all_tensor_names.update(node.output)
+    
+    # Find missing tensors
+    missing_tensors = all_tensor_names - set(known_shapes.keys())
+    
+    if missing_tensors:
+        print(f"⚠️  Found {len(missing_tensors)} tensors with missing shapes")
+        print(f"Missing tensors: {list(missing_tensors)[:10]}...")  # Show first 10
+        
+        # Try to infer shapes from connected nodes
+        for tensor_name in missing_tensors:
+            # Find nodes that produce this tensor
+            producer_nodes = [n for n in graph.node if tensor_name in n.output]
+            consumer_nodes = [n for n in graph.node if tensor_name in n.input]
+            
+            inferred_shape = None
+            
+            # Try to infer from producer
+            if producer_nodes:
+                producer = producer_nodes[0]
+                
+                # For gradient accumulation nodes, use input shape
+                if 'AccumulateGrad' in producer.op_type or 'Gradient' in producer.op_type:
+                    for input_name in producer.input:
+                        if input_name in known_shapes:
+                            inferred_shape = known_shapes[input_name]
+                            break
+                
+                # For element-wise ops, inherit from input
+                elif producer.op_type in ['Add', 'Sub', 'Mul', 'Div', 'Relu', 'Identity']:
+                    for input_name in producer.input:
+                        if input_name in known_shapes:
+                            inferred_shape = known_shapes[input_name]
+                            break
+            
+            # Try to infer from consumer
+            if inferred_shape is None and consumer_nodes:
+                consumer = consumer_nodes[0]
+                for input_name in consumer.input:
+                    if input_name != tensor_name and input_name in known_shapes:
+                        inferred_shape = known_shapes[input_name]
+                        break
+            
+            # If we found a shape, add it to value_info
+            if inferred_shape is not None:
+                # Create value_info with inferred shape
+                tensor_type = onnx.TensorProto.FLOAT  # Default to FLOAT
+                value_info = helper.make_tensor_value_info(
+                    tensor_name,
+                    tensor_type,
+                    inferred_shape
+                )
+                graph.value_info.append(value_info)
+                known_shapes[tensor_name] = inferred_shape
+                print(f"✅ Inferred shape for {tensor_name}: {inferred_shape}")
+    
+    # Final shape inference pass
+    try:
+        onnx_model = onnx.shape_inference.infer_shapes(onnx_model)
+        print("✅ Final shape inference completed")
+    except Exception as e:
+        print(f"⚠️  Final shape inference warning: {e}")
+    
+    # Verify all tensors now have shapes
+    remaining_missing = []
+    for value_info in graph.value_info:
+        if not value_info.type.tensor_type.HasField('shape'):
+            remaining_missing.append(value_info.name)
+    
+    if remaining_missing:
+        print(f"⚠️  Warning: {len(remaining_missing)} tensors still missing shapes")
+        print(f"Remaining missing: {remaining_missing[:10]}")
+    else:
+        print("✅ All tensors have shape annotations")
+    
+    # Save the model
+    onnx.save(onnx_model, output_path)
+    print(f"✅ Saved model with complete shapes to {output_path}")
+    
+    return onnx_model

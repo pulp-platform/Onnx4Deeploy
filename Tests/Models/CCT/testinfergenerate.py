@@ -66,9 +66,6 @@ def generate_cct_onnx_and_data(save_path=None):
     np.savez(output_file, output=output_data)
     print(f"✅ Output data saved to {output_file}")
 
-    optimize_matrix_operations(onnx_file, onnx_file)
-    print(f"✅ Successfully optimized matrix operations. Saved as {onnx_file}")
-
     unify_gemm_input_dims(onnx_file, onnx_file)
     print(f"✅ Successfully unified GEMM input dimensions. Saved as {onnx_file}")
 

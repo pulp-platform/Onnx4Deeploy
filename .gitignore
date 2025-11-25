@@ -15,3 +15,11 @@ Tests/Operators/testFloatSGD/onnx/sgd_test/outputs.npz
 Tests/Operators/testFloatSGD/onnx/sgd_test/sgd_reference.py
 Report/*
 
+Tests/Models/CCT/__pycache__/mnistCheckpoint.cpython-310.pyc
+Tests/Models/CCT/CCT/__pycache__/cct.cpython-310.pyc
+Tests/Models/CCT/CCT/__pycache__/registry.cpython-310.pyc
+Tests/Models/CCT/CCT/utils/__pycache__/__init__.cpython-310.pyc
+Tests/Models/CCT/CCT/utils/__pycache__/helpers.cpython-310.pyc
+Tests/Models/CCT/CCT/utils/__pycache__/stochastic_depth.cpython-310.pyc
+Tests/Models/CCT/CCT/utils/__pycache__/tokenizer.cpython-310.pyc
+Tests/Models/CCT/CCT/utils/__pycache__/transformers.cpython-310.pyc

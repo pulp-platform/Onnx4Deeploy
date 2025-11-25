@@ -1,0 +1,10 @@
+gemm:
+  input_a_shape: [8, 8]
+  input_b_shape: [8, 8]
+  transA: 0
+  transB: 0
+  alpha: 1.0
+  beta: 1.0
+  a_is_const: false
+  b_is_const: false
+  use_bias: true  

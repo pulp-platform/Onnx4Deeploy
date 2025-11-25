@@ -1,8 +1,2 @@
-# Configuration for ONNX operator test data generation
-
-softmax_grad:
-  input_shape: [4, 16, 64]  # [batch_size, sequence_length, feature_dim]
-
-layernorm_grad:
-  input_shape: [4, 16, 768]  # [batch_size, sequence_length, feature_dim]
-  epsilon: 1.0e-5  # Small value for numerical stability
+layernormgrad:
+  input_shape: [1, 32, 32]

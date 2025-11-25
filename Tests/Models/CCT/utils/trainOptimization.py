@@ -7,6 +7,7 @@ from onnx import helper, numpy_helper, shape_inference
 import numpy as np
 import copy
 
+
 def add_c_to_gemm(input_model_path, output_model_path):
     model = onnx.load(input_model_path)
     graph = model.graph
@@ -86,6 +87,268 @@ def add_c_to_gemm(input_model_path, output_model_path):
     onnx.save(model, output_model_path)
     print(f"Saved to: {output_model_path}")
 
+def convert_gemm_to_transpose_matmul(input_model_path, output_model_path):
+    """
+    Convert GEMM nodes to Transpose + MatMul nodes with refined strategy:
+    1. Only convert GEMM when it's beneficial (avoid unnecessary transpose of constants)
+    2. Skip GEMM nodes that were likely converted from FusedMatMul
+    3. Minimize constant transposition
+    """
+    model = onnx.load(input_model_path)
+    
+    print(f"Original model: {len(model.graph.node)} nodes, {len(model.graph.initializer)} initializers", flush=True)
+    
+    new_nodes = []
+    transpose_cache = {}
+    
+    # 创建initializer名称查找集合
+    initializer_names = {init.name for init in model.graph.initializer}
+    
+    def should_convert_gemm(node):
+        """
+        决定是否应该转换这个GEMM节点
+        判断标准：只有当需要转置的输入不是常量时才进行转换
+        """
+        # 检查是否有bias (第三个输入)
+        if len(node.input) > 2 and node.input[2]:
+            print(f"  Skip: GEMM has bias", flush=True)
+            return False
+        
+        # 解析GEMM属性
+        transA = False
+        transB = False
+        
+        for attr in node.attribute:
+            if attr.name == "transA":
+                transA = attr.i == 1
+            elif attr.name == "transB":
+                transB = attr.i == 1
+        
+        # 检查输入是否为常量
+        input_a_is_const = node.input[0] in initializer_names
+        input_b_is_const = len(node.input) > 1 and node.input[1] in initializer_names
+        
+        # 核心判断：如果需要转置的输入是常量，则跳过转换
+        if transA and input_a_is_const:
+            print(f"  Skip: transA=True but input A is constant", flush=True)
+            return False
+            
+        if transB and input_b_is_const:
+            print(f"  Skip: transB=True but input B is constant", flush=True)
+            return False
+        
+        # 如果需要转置的输入不是常量，或者不需要转置，则进行转换
+        if transA or transB:
+            print(f"  Convert: transpose needed on non-constant input(s) (transA={transA}, transB={transB})", flush=True)
+            return True
+        else:
+            print(f"  Convert: no transpose needed", flush=True)
+            return True
+    
+    def get_tensor_dims(tensor_name):
+        """获取张量的维度数"""
+        for vi in model.graph.value_info:
+            if vi.name == tensor_name:
+                return len(vi.type.tensor_type.shape.dim)
+        
+        for init in model.graph.initializer:
+            if init.name == tensor_name:
+                return len(init.dims)
+        
+        for inp in model.graph.input:
+            if inp.name == tensor_name:
+                return len(inp.type.tensor_type.shape.dim)
+        
+        return 2  # 默认假设2D
+    
+    def create_optimized_transpose(input_tensor, is_const, transpose_type, node_index):
+        """
+        创建优化的转置操作
+        """
+        if is_const:
+            # 对常量进行预计算转置
+            transposed_name = f"{input_tensor}_T"
+            if transposed_name not in [init.name for init in model.graph.initializer]:
+                for init in model.graph.initializer:
+                    if init.name == input_tensor:
+                        array = numpy_helper.to_array(init)
+                        transposed_array = np.transpose(array)
+                        new_init = numpy_helper.from_array(transposed_array, name=transposed_name)
+                        model.graph.initializer.append(new_init)
+                        print(f"  -> Created transposed constant: {transposed_name}", flush=True)
+                        break
+            return transposed_name
+        else:
+            # 动态转置
+            cache_key = f"transpose_{transpose_type}_{input_tensor}"
+            if cache_key not in transpose_cache:
+                transpose_output = f"{input_tensor}_transposed_{transpose_type}"
+                
+                input_dims = get_tensor_dims(input_tensor)
+                
+                # 根据维度数设置perm
+                if input_dims == 2:
+                    perm = [1, 0]
+                elif input_dims == 3:
+                    perm = [0, 2, 1]  # 只转置最后两个维度
+                elif input_dims == 4:
+                    perm = [0, 1, 3, 2]  # 只转置最后两个维度
+                else:
+                    # 对于更高维度，转置最后两个维度
+                    perm = list(range(input_dims))
+                    perm[input_dims-2], perm[input_dims-1] = perm[input_dims-1], perm[input_dims-2]
+                
+                transpose_node = helper.make_node(
+                    "Transpose",
+                    inputs=[input_tensor],
+                    outputs=[transpose_output],
+                    name=f"transpose_{transpose_type}_{node_index}",
+                    perm=perm
+                )
+                new_nodes.append(transpose_node)
+                transpose_cache[cache_key] = transpose_output
+                
+                # 添加形状信息
+                for vi in model.graph.value_info:
+                    if vi.name == input_tensor:
+                        input_shape = vi.type.tensor_type.shape
+                        transposed_dims = []
+                        for p in perm:
+                            dim = input_shape.dim[p]
+                            if dim.dim_value:
+                                transposed_dims.append(dim.dim_value)
+                            elif dim.dim_param:
+                                transposed_dims.append(dim.dim_param)
+                            else:
+                                transposed_dims.append(None)
+                        
+                        tensor_type = helper.make_tensor_type_proto(
+                            elem_type=1,  # FLOAT
+                            shape=transposed_dims
+                        )
+                        value_info = helper.make_value_info(transpose_output, tensor_type)
+                        model.graph.value_info.append(value_info)
+                        break
+                
+                print(f"  -> Added Transpose for {transpose_type} with perm={perm}", flush=True)
+            
+            return transpose_cache[cache_key]
+    
+    converted_count = 0
+    skipped_count = 0
+    
+    for node_index, node in enumerate(model.graph.node):
+        if node.op_type == "Gemm":
+            print(f"Evaluating GEMM: {node.name}", flush=True)
+            print(f"  Inputs: {node.input}", flush=True)
+            
+            if should_convert_gemm(node):
+                converted_count += 1
+                print(f"Converting GEMM: {node.name}", flush=True)
+                
+                # 解析GEMM属性
+                transA = False
+                transB = False
+                alpha = 1.0
+                
+                for attr in node.attribute:
+                    if attr.name == "transA":
+                        transA = attr.i == 1
+                    elif attr.name == "transB":
+                        transB = attr.i == 1
+                    elif attr.name == "alpha":
+                        alpha = attr.f
+                
+                current_inputs = list(node.input[:2])
+                
+                # 处理A的转置
+                if transA:
+                    input_a = current_inputs[0]
+                    is_const = input_a in initializer_names
+                    current_inputs[0] = create_optimized_transpose(input_a, is_const, "A", node_index)
+                
+                # 处理B的转置
+                if transB:
+                    input_b = current_inputs[1]
+                    is_const = input_b in initializer_names
+                    current_inputs[1] = create_optimized_transpose(input_b, is_const, "B", node_index)
+                
+                # 创建MatMul节点
+                matmul_output = node.output[0] if alpha == 1.0 else f"{node.name}_matmul_out"
+                
+                matmul_node = helper.make_node(
+                    "MatMul",
+                    inputs=current_inputs,
+                    outputs=[matmul_output],
+                    name=f"matmul_{node.name}" if node.name else f"matmul_{node_index}"
+                )
+                new_nodes.append(matmul_node)
+                print(f"  -> Added MatMul: {matmul_node.name}", flush=True)
+                
+                # 处理alpha scaling
+                if alpha != 1.0:
+                    alpha_name = f"alpha_{node.name}_{node_index}"
+                    alpha_tensor = numpy_helper.from_array(np.array([alpha], dtype=np.float32), name=alpha_name)
+                    model.graph.initializer.append(alpha_tensor)
+                    
+                    mul_node = helper.make_node(
+                        "Mul",
+                        inputs=[matmul_output, alpha_name],
+                        outputs=node.output,
+                        name=f"mul_{node.name}_{node_index}"
+                    )
+                    new_nodes.append(mul_node)
+                    print(f"  -> Added Mul for alpha={alpha}", flush=True)
+                
+            else:
+                skipped_count += 1
+                # 保持GEMM节点不变
+                new_nodes.append(node)
+                
+        else:
+            # 保持其他节点不变
+            new_nodes.append(node)
+    
+    # 创建新模型
+    new_graph = helper.make_graph(
+        nodes=new_nodes,
+        name=model.graph.name,
+        inputs=model.graph.input,
+        outputs=model.graph.output,
+        initializer=model.graph.initializer,
+        value_info=model.graph.value_info
+    )
+    
+    new_model = helper.make_model(
+        new_graph,
+        producer_name=model.producer_name,
+        opset_imports=model.opset_import,
+        ir_version=model.ir_version
+    )
+    
+    new_model.metadata_props.extend(model.metadata_props)
+    
+    # 运行形状推断
+    try:
+        print("Running shape inference...", flush=True)
+        inferred_model = onnx.shape_inference.infer_shapes(new_model)
+        onnx.save(inferred_model, output_model_path)
+        print("✅ Shape inference completed", flush=True)
+    except Exception as e:
+        print(f"⚠️ Shape inference failed: {e}, saving without inference", flush=True)
+        onnx.save(new_model, output_model_path)
+    
+    matmul_count = len([n for n in new_nodes if n.op_type == 'MatMul'])
+    transpose_count = len([n for n in new_nodes if n.op_type == 'Transpose'])
+    gemm_count = len([n for n in new_nodes if n.op_type == 'Gemm'])
+    
+    print(f"="*60)
+    print(f"✅ Conversion Summary:")
+    print(f"   - Converted {converted_count} GEMM nodes to MatMul")
+    print(f"   - Skipped {skipped_count} GEMM nodes (kept as GEMM)")
+    print(f"   - Final counts: {matmul_count} MatMul, {transpose_count} Transpose, {gemm_count} GEMM")
+    print(f"="*60)
+    
 def unify_gemm_input_dims(input_model_path, output_model_path):
     """
     统一GEMM节点的输入维度，避免名称冲突
@@ -130,6 +393,8 @@ def unify_gemm_input_dims(input_model_path, output_model_path):
         existing_names.add(unique_name)
         return unique_name
     
+
+
     def get_or_create_reshaped_initializer(initializer, target_shape, existing_names, reshaped_cache):
         """获取或创建reshaped的initializer，避免重复"""
         
@@ -260,164 +525,245 @@ def unify_gemm_input_dims(input_model_path, output_model_path):
     
     return modified_nodes
 
-def optimize_matrix_operations(input_model_path, output_model_path):
+def fuse_matmul_add_to_gemm(input_model_path, output_model_path):
     """
-    Optimize matrix operations in ONNX model:
-    1. Fuse MatMul+Add into GEMM
-    2. Add missing C tensor to GEMM operations with only A and B inputs
+    MatMul+Add fusion with proper consumer checking
+    Only fuses MatMul -> Add patterns where Add's output is used by at most one consumer
+    """
+    import onnx
+    from onnx import helper
     
-    Args:
-        input_model_path: Path to the input model
-        output_model_path: Path to save the optimized model
-    """
     model = onnx.load(input_model_path)
     graph = model.graph
     
-    # Create maps for node traversal
-    output_map = {}  # Map output tensor names to their producing nodes
-    input_map = {}   # Map input tensor names to nodes consuming them
+    print("🔍 MatMul+Add fusion with constant bias validation...")
+    
+    # Build dependency maps
+    output_to_node = {}
+    input_to_nodes = {}
     
     for node in graph.node:
         for output in node.output:
-            output_map[output] = node
-        
-        for input_name in node.input:
-            if input_name not in input_map:
-                input_map[input_name] = []
-            input_map[input_name].append(node)
+            output_to_node[output] = node
+        for inp in node.input:
+            if inp not in input_to_nodes:
+                input_to_nodes[inp] = []
+            input_to_nodes[inp].append(node)
     
-    # === PASS 1: Fuse MatMul+Add to GEMM ===
-    nodes_to_remove = []
-    nodes_to_add = []
+    # Find valid MatMul+Add patterns
+    valid_fusions = []
     
     for node in graph.node:
         if node.op_type == 'MatMul':
-            matmul_node = node
-            matmul_output = matmul_node.output[0]
-            
-            # Check if this MatMul's output is used by exactly one Add node
-            if matmul_output in input_map and len(input_map[matmul_output]) == 1:
-                next_node = input_map[matmul_output][0]
+            # Check MatMul structure: exactly 2 inputs, 1 output
+            if len(node.input) != 2 or len(node.output) != 1:
+                print(f"  ✗ Skip {node.name}: invalid MatMul structure")
+                continue
                 
-                if next_node.op_type == 'Add':
-                    add_node = next_node
-                    
-                    # Get MatMul inputs
-                    a_name = matmul_node.input[0]
-                    b_name = matmul_node.input[1]
-                    
-                    # Get Add bias input
-                    if add_node.input[0] == matmul_output:
-                        c_name = add_node.input[1]
-                    else:
-                        c_name = add_node.input[0]
-                    
-                    # Create new GEMM node
-                    gemm_node = onnx.helper.make_node(
-                        'Gemm',
-                        inputs=[a_name, b_name, c_name],
-                        outputs=[add_node.output[0]],
-                        name=f"{matmul_node.name}_fused_with_{add_node.name}"
-                    )
-                    
-                    # Add GEMM node attributes
-                    alpha_attr = onnx.helper.make_attribute('alpha', 1.0)
-                    beta_attr = onnx.helper.make_attribute('beta', 1.0)
-                    gemm_node.attribute.append(alpha_attr)
-                    gemm_node.attribute.append(beta_attr)
-                    
-                    # Mark nodes for removal and addition
-                    nodes_to_remove.append(matmul_node)
-                    nodes_to_remove.append(add_node)
-                    nodes_to_add.append(gemm_node)
-                    
-                    print(f"Fusing MatMul {matmul_node.name} and Add {add_node.name} into GEMM {gemm_node.name}")
-    
-    # Apply the changes from Pass 1
-    for node in nodes_to_remove:
-        if node in graph.node:  # Check if node is still in graph
-            graph.node.remove(node)
-    
-    for node in nodes_to_add:
-        graph.node.append(node)
-    
-    # === PASS 2: Add missing C tensor to GEMM operations ===
-    for node in graph.node:
-        if node.op_type == 'Gemm' and len(node.input) == 2:
-            print(f"Find Gemm without C: {node.name}")
+            matmul_output = node.output[0]
             
-            input_a_name = node.input[0]
-            input_b_name = node.input[1]
+            # Check consumers of MatMul output
+            matmul_consumers = input_to_nodes.get(matmul_output, [])
+            if len(matmul_consumers) != 1:
+                print(f"  ✗ Skip {node.name}: MatMul output has {len(matmul_consumers)} consumers (should be exactly 1)")
+                continue
+                
+            add_node = matmul_consumers[0]
             
-            # Try to get B shape from initializer
-            b_shape = None
-            for init in graph.initializer:
-                if init.name == input_b_name:
-                    b_tensor = numpy_helper.to_array(init)
-                    b_shape = b_tensor.shape
-                    break
+            # Check Add structure: exactly 2 inputs, 1 output, is Add operation
+            if (add_node.op_type != 'Add' or 
+                len(add_node.input) != 2 or 
+                len(add_node.output) != 1):
+                print(f"  ✗ Skip {node.name}: consumer is not valid Add")
+                continue
+                
+            # Verify Add uses MatMul output
+            if matmul_output not in add_node.input:
+                print(f"  ✗ Skip {node.name}: Add doesn't use MatMul output")
+                continue
             
-            # If not found, try to get from value_info
-            if b_shape is None:
-                for vi in graph.value_info:
-                    if vi.name == input_b_name:
-                        b_shape = [dim.dim_value for dim in vi.type.tensor_type.shape.dim]
-                        break
+            # Get the bias input (the other input to Add)
+            bias_input = add_node.input[1] if add_node.input[0] == matmul_output else add_node.input[0]
             
-            # If still not found, try to infer from output shape
-            if b_shape is None:
-                output_name = node.output[0]
-                all_value_infos = list(graph.value_info) + list(graph.output)
-                
-                for vi in all_value_infos:
-                    if vi.name == output_name:
-                        # Ensure we have dimension info
-                        if vi.type.tensor_type.shape.dim:
-                            output_shape = [dim.dim_value for dim in vi.type.tensor_type.shape.dim]
-                            
-                            # Check if output_shape has enough elements
-                            if output_shape and all(output_shape):
-                                transB = 0
-                                for attr in node.attribute:
-                                    if attr.name == 'transB' and attr.i == 1:
-                                        transB = 1
-                                
-                                c_length = output_shape[-1]
-                                b_shape = [c_length, 0] if transB == 0 else [0, c_length]
-                        break
+            # ⭐ KEY CHECK 1: Bias input must be constant (initializer), not from computation
+            graph_inputs = {inp.name for inp in graph.input}
+            initializers = {init.name for init in graph.initializer}
             
-            # If we successfully got shape info, add C tensor
-            if b_shape is not None and len(b_shape) >= 2 and (b_shape[0] > 0 or b_shape[1] > 0):
-                transB = 0
-                for attr in node.attribute:
-                    if attr.name == 'transB' and attr.i == 1:
-                        transB = 1
-                
-                # Ensure we get valid shapes
-                if transB == 0 and b_shape[1] > 0:
-                    c_shape = [b_shape[1]]
-                elif transB == 1 and b_shape[0] > 0:
-                    c_shape = [b_shape[0]]
-                else:
-                    print(f"Warning: Invalid shape {b_shape} for {node.name}, skip this node.")
-                    continue
-                
-                c_tensor = np.zeros(c_shape, dtype=np.float32)
-                c_name = f"{node.name}_c_bias"
-                
-                c_initializer = numpy_helper.from_array(c_tensor, name=c_name)
-                graph.initializer.append(c_initializer)
-                
-                node.input.append(c_name)
-                print(f"Add C: {c_name}, Shape: {c_shape}")
+            if bias_input in output_to_node:
+                # Bias comes from another node's output - this is NOT allowed
+                bias_producer = output_to_node[bias_input]
+                print(f"  ✗ Skip {node.name}: bias input '{bias_input}' comes from node '{bias_producer.name}' ({bias_producer.op_type})")
+                print(f"    Only constant bias is allowed, not computed values from branches")
+                continue
+            elif bias_input in initializers:
+                print(f"  ✓ Bias input '{bias_input}' is initializer (constant)")
+            elif bias_input in graph_inputs:
+                print(f"  ⚠️  Bias input '{bias_input}' is graph input (may be acceptable)")
             else:
-                print(f"Warning: Cannot find valid shape for {node.name}, skip this node.")
+                print(f"  ✗ Skip {node.name}: bias input '{bias_input}' source unknown")
+                continue
+            
+            # ⭐ KEY CHECK 2: Check if Add output is used by multiple consumers
+            add_output = add_node.output[0]
+            add_consumers = input_to_nodes.get(add_output, [])
+            
+            # Also check if Add output is a graph output
+            graph_outputs = {out.name for out in graph.output}
+            is_graph_output = add_output in graph_outputs
+            
+            total_consumers = len(add_consumers) + (1 if is_graph_output else 0)
+            
+            if total_consumers > 1:
+                consumer_names = [c.name for c in add_consumers]
+                if is_graph_output:
+                    consumer_names.append("GRAPH_OUTPUT")
+                print(f"  ✗ Skip {node.name}: Add output '{add_output}' used by {total_consumers} consumers: {consumer_names}")
+                print(f"    Cannot fuse because fusion would affect multiple downstream nodes")
+                continue
+            elif total_consumers == 0:
+                print(f"  ⚠️  Add output '{add_output}' has no consumers - dead code?")
+            
+            # Check MatMul output is not a graph output (already checked Add output above)
+            if matmul_output in graph_outputs:
+                print(f"  ✗ Skip {node.name}: MatMul output is graph output")
+                continue
+            
+            # Additional safety check: ensure MatMul output isn't used elsewhere
+            other_matmul_refs = 0
+            for check_node in graph.node:
+                if check_node != add_node:
+                    for inp in check_node.input:
+                        if inp == matmul_output:
+                            other_matmul_refs += 1
+                            print(f"  ✗ Skip {node.name}: MatMul output used by {check_node.name}")
+            
+            if other_matmul_refs > 0:
+                continue
+                
+            valid_fusions.append((node, add_node, bias_input))
+            print(f"  ✅ Valid fusion: {node.name} + {add_node.name}")
+            print(f"     MatMul: {node.input} -> {matmul_output}")
+            print(f"     Add: [{matmul_output}, {bias_input}] -> {add_output} (bias is constant)")
+            print(f"     Add consumers: {len(add_consumers)} + graph_output={is_graph_output}")
     
-    # Save the optimized model
+    if not valid_fusions:
+        print("  No valid MatMul+Add patterns found for fusion")
+        onnx.save(model, output_model_path)
+        return model
+    
+    print(f"\n🔗 Applying {len(valid_fusions)} validated fusions...")
+    
+    # Apply fusions
+    nodes_to_remove = []
+    nodes_to_add = []
+    
+    for matmul_node, add_node, bias_input in valid_fusions:
+        print(f"\n  Fusing: {matmul_node.name} + {add_node.name}")
+        
+        # Get inputs for GEMM
+        input_A = matmul_node.input[0]  # First matrix
+        input_B = matmul_node.input[1]  # Second matrix  
+        input_C = bias_input            # Bias
+        
+        # Create GEMM node
+        gemm_node = helper.make_node(
+            'Gemm',
+            inputs=[input_A, input_B, input_C],
+            outputs=add_node.output,
+            name=add_node.name  # Preserve Add node name
+        )
+        
+        # Set GEMM attributes
+        gemm_node.attribute.extend([
+            helper.make_attribute('alpha', 1.0),   # A*B scaling
+            helper.make_attribute('beta', 1.0),    # bias scaling
+            helper.make_attribute('transA', 0),    # no transpose A
+            helper.make_attribute('transB', 0)     # no transpose B
+        ])
+        
+        nodes_to_remove.extend([matmul_node, add_node])
+        nodes_to_add.append(gemm_node)
+        
+        print(f"    GEMM inputs: A={input_A}, B={input_B}, bias={input_C}")
+        print(f"    GEMM output: {add_node.output[0]}")
+        print(f"    GEMM name: {add_node.name}")
+    
+    # Apply changes
+    print(f"\n📝 Updating graph...")
+    
+    # Remove fused nodes
+    for old_node in nodes_to_remove:
+        if old_node in graph.node:
+            graph.node.remove(old_node)
+    
+    # Add new GEMM nodes
+    for new_node in nodes_to_add:
+        graph.node.append(new_node)
+    
+    # Save model
     onnx.save(model, output_model_path)
-    print(f"Model optimized and saved to: {output_model_path}")
+    
+    print(f"\n{'='*60}")
+    print(f"✅ CONSTANT-BIAS FUSION COMPLETE")  
+    print(f"{'='*60}")
+    print(f"Fusions applied: {len(valid_fusions)}")
+    print(f"Rejected computed bias inputs: ✓")
+    print(f"Only accepted constant bias: ✓") 
+    print(f"Skipped multi-consumer Add nodes: ✓")
+    print(f"Model saved: {output_model_path}")
+    print(f"{'='*60}")
+    
     return model
 
+def annotate_node_names_with_type(model):
+    """
+    为ONNX模型中的每个节点名称添加类型注释
+    
+    Args:
+        model: ONNX模型对象
+        
+    Returns:
+        修改后的ONNX模型对象
+    """
+    # 遍历模型中的所有节点
+    for i, node in enumerate(model.graph.node):
+        # 获取节点的操作类型
+        op_type = node.op_type
+        
+        # 如果节点已经有名称，在名称后添加类型
+        if node.name:
+            new_name = f"{node.name}_{op_type}"
+        else:
+            # 如果节点没有名称，创建一个基于索引和类型的名称
+            new_name = f"node_{i}_{op_type}"
+        
+        # 更新节点名称
+        node.name = new_name
+    
+    return model
+
+def process_onnx_model_name_with_type(model_path, output_path=None):
+    """
+    处理ONNX模型，为节点名称添加类型注释
+    
+    Args:
+        input_path: 输入ONNX模型文件路径
+        output_path: 输出ONNX模型文件路径（可选）
+    """
+    model = onnx.load(model_path)
+    
+    # 遍历所有节点，添加类型到名称
+    for i, node in enumerate(model.graph.node):
+        if node.name:
+            node.name = f"{node.name}_{node.op_type}"
+        else:
+            node.name = f"node_{i}_{node.op_type}"
+    
+    # 保存模型（不验证）
+    save_path = output_path if output_path else model_path
+    onnx.save(model, save_path)
+    
+    return model
 
 def replace_biasgelu_with_gelu_add(input_model_path, output_model_path):
  
@@ -1517,17 +1863,126 @@ def convert_reducesum_axes_to_attr(input_file: str, output_file: str):
     print(f"Model converted and saved to: {output_file}")
 
 
-import onnx
-import numpy as np
-import hashlib
-import re
-from onnx import helper, numpy_helper
 
-def convert_fusedmatmul_to_gemm(input_model_path, output_model_path):
+import re
+
+def add_backward_markers_to_nodes(input_model_path, output_model_path):
     """
-    Convert Microsoft's FusedMatMul nodes to standard Gemm nodes in an ONNX model.
-    Enhanced with complex naming strategy to prevent any naming conflicts.
-    Names are encoded with input/output information and unique identifiers.
+    Add backward markers to node names based on various criteria:
+    1. Node name contains 'grad' (case insensitive)
+    2. Input/output tensor names contain 'grad' (case insensitive)  
+    3. Description contains 'Backward pass' (case insensitive)
+    
+    Args:
+        input_model_path: Path to the input ONNX model
+        output_model_path: Path to save the marked ONNX model
+    """
+    # Load the model
+    model = onnx.load(input_model_path)
+    
+    print(f"🔍 Analyzing nodes for backward pass detection...")
+    
+    backward_nodes_found = 0
+    already_marked_nodes = 0
+    
+    for node in model.graph.node:
+        is_backward = False
+        detection_reasons = []
+        
+        # Check 1: Node name contains 'grad'
+        if node.name and 'grad' in node.name.lower():
+            is_backward = True
+            detection_reasons.append(f"node name contains 'grad': {node.name}")
+        
+        # Check 2: Input tensor names contain 'grad'
+        for input_tensor in node.input:
+            if 'grad' in input_tensor.lower():
+                is_backward = True
+                detection_reasons.append(f"input tensor contains 'grad': {input_tensor}")
+                break  # Found one, no need to check more inputs
+        
+        # Check 3: Output tensor names contain 'grad'
+        if not is_backward:  # Only check if not already detected
+            for output_tensor in node.output:
+                if 'grad' in output_tensor.lower():
+                    is_backward = True
+                    detection_reasons.append(f"output tensor contains 'grad': {output_tensor}")
+                    break  # Found one, no need to check more outputs
+        
+        # Check 4: Description contains 'Backward pass'
+        if not is_backward:  # Only check if not already detected
+            for attr in node.attribute:
+                if attr.name == "description":
+                    description = attr.s.decode('utf-8') if attr.s else ""
+                    if 'backward pass' in description.lower():
+                        is_backward = True
+                        detection_reasons.append(f"description contains 'Backward pass': {description}")
+                        break
+        
+        # If this is a backward node, modify its name
+        if is_backward:
+            # Check if already marked with 'backward'
+            if 'backward' in node.name.lower():
+                already_marked_nodes += 1
+                print(f"  ⚪ Already marked: {node.name}")
+            else:
+                # Add 'backward' to the node name
+                if node.name:
+                    new_name = f"{node.name}_backward"
+                else:
+                    new_name = f"backward_node_{backward_nodes_found}"
+                
+                old_name = node.name
+                node.name = new_name
+                backward_nodes_found += 1
+                
+                print(f"  🔴 Marked backward: {old_name} -> {new_name}")
+                for reason in detection_reasons:
+                    print(f"     Reason: {reason}")
+                
+                # Also add/update description attribute to mark as backward
+                description_found = False
+                for attr in node.attribute:
+                    if attr.name == "description":
+                        original_desc = attr.s.decode('utf-8') if attr.s else ""
+                        if 'backward pass' not in original_desc.lower():
+                            new_desc = f"[Backward pass] {original_desc}" if original_desc else "[Backward pass]"
+                            attr.s = new_desc.encode('utf-8')
+                            print(f"     Updated description: {new_desc}")
+                        description_found = True
+                        break
+                
+                # If no description attribute exists, create one
+                if not description_found:
+                    desc_attr = helper.make_attribute("description", "[Backward pass]")
+                    node.attribute.append(desc_attr)
+                    print(f"     Added description: [Backward pass]")
+    
+    # Save the modified model
+    onnx.save(model, output_model_path)
+    
+    # Summary
+    total_nodes = len(model.graph.node)
+    total_backward = backward_nodes_found + already_marked_nodes
+    forward_nodes = total_nodes - total_backward
+    
+    print(f"\n{'='*60}")
+    print(f"✅ BACKWARD NODE MARKING SUMMARY")
+    print(f"{'='*60}")
+    print(f"Total nodes in model: {total_nodes}")
+    print(f"Forward nodes: {forward_nodes} ({forward_nodes/total_nodes*100:.1f}%)")
+    print(f"Backward nodes (total): {total_backward} ({total_backward/total_nodes*100:.1f}%)")
+    print(f"  - Newly marked: {backward_nodes_found}")
+    print(f"  - Already marked: {already_marked_nodes}")
+    print(f"Model saved to: {output_model_path}")
+    print(f"{'='*60}")
+    
+    return model
+
+def convert_fusedmatmul_to_no_bias_gemm(input_model_path, output_model_path):
+    """
+    Convert Microsoft's FusedMatMul nodes to standard Gemm nodes WITHOUT bias in an ONNX model.
+    Enhanced with description preservation and naming strategy to prevent conflicts.
     
     Args:
         input_model_path: Path to the input ONNX model
@@ -1536,34 +1991,29 @@ def convert_fusedmatmul_to_gemm(input_model_path, output_model_path):
     # Load the model
     model = onnx.load(input_model_path)
     
+    # Extract descriptions from all nodes before transformation
+    node_descriptions = {}
+    for node in model.graph.node:
+        description = None
+        for attr in node.attribute:
+            if attr.name == "description":
+                description = attr.s.decode('utf-8') if attr.s else ""
+                break
+        node_descriptions[node.name] = description
+    
     # Track necessary changes
     new_nodes = []
-    new_initializers = []
     
-    # Keep track of all existing names to avoid conflicts
-    existing_names = set()
+    # Keep track of existing node names to avoid conflicts only for new nodes
+    existing_node_names = set()
     
-    # Collect all existing names from the model
-    def collect_existing_names():
+    # Collect existing node names
+    def collect_existing_node_names():
         for node in model.graph.node:
             if node.name:
-                existing_names.add(node.name)
-            for output in node.output:
-                existing_names.add(output)
-        
-        for init in model.graph.initializer:
-            existing_names.add(init.name)
-        
-        for vi in model.graph.value_info:
-            existing_names.add(vi.name)
-        
-        for inp in model.graph.input:
-            existing_names.add(inp.name)
-        
-        for out in model.graph.output:
-            existing_names.add(out.name)
+                existing_node_names.add(node.name)
     
-    collect_existing_names()
+    collect_existing_node_names()
     
     def sanitize_name(name):
         """Clean name for use in identifiers"""
@@ -1575,108 +2025,32 @@ def convert_fusedmatmul_to_gemm(input_model_path, output_model_path):
         sanitized = sanitized.strip('_')
         return sanitized[:50]  # Limit length
     
-    def encode_inputs_outputs(inputs, outputs):
-        """Create a unique hash from inputs and outputs"""
-        # Combine all input and output names
-        combined = '|'.join(inputs + outputs)
-        # Create a short hash
-        hash_obj = hashlib.md5(combined.encode())
-        return hash_obj.hexdigest()[:8]
-    
-    def create_enhanced_name(base_name, inputs, outputs, node_index, name_type="node"):
-        """Create an enhanced name with input/output encoding"""
-        
-        # 1. Sanitize base name
-        clean_base = sanitize_name(base_name) if base_name else f"auto_{name_type}"
-        
-        # 2. Create input signature
-        input_sig = "_".join([sanitize_name(inp)[:15] for inp in inputs[:2]])  # First 2 inputs
-        
-        # 3. Create output signature  
-        output_sig = "_".join([sanitize_name(out)[:15] for out in outputs[:2]])  # First 2 outputs
-        
-        # 4. Create hash of all inputs/outputs
-        io_hash = encode_inputs_outputs(inputs, outputs)
-        
-        # 5. Combine everything
-        enhanced_name = f"{clean_base}_i{input_sig}_o{output_sig}_h{io_hash}_n{node_index}"
-        
-        # 6. Ensure uniqueness
-        return generate_absolutely_unique_name(enhanced_name, existing_names)
-    
-    def generate_absolutely_unique_name(base_name, existing_names):
-        """Generate a globally unique name with fallback strategies"""
-        if base_name not in existing_names:
-            existing_names.add(base_name)
+    def generate_unique_node_name(base_name, existing_node_names):
+        """Generate a unique node name with simple counter strategy"""
+        if base_name not in existing_node_names:
+            existing_node_names.add(base_name)
             return base_name
         
-        # Strategy 1: Add counter
+        # Add counter until unique
         for counter in range(1, 1000):
-            candidate = f"{base_name}_v{counter}"
-            if candidate not in existing_names:
-                existing_names.add(candidate)
-                return candidate
-        
-        # Strategy 2: Add timestamp-like suffix
-        import time
-        timestamp_suffix = str(int(time.time() * 1000000))[-8:]  # Last 8 digits
-        candidate = f"{base_name}_t{timestamp_suffix}"
-        if candidate not in existing_names:
-            existing_names.add(candidate)
-            return candidate
-        
-        # Strategy 3: Add random suffix (fallback)
-        import random
-        for _ in range(100):
-            random_suffix = ''.join(random.choices('0123456789abcdef', k=8))
-            candidate = f"{base_name}_r{random_suffix}"
-            if candidate not in existing_names:
-                existing_names.add(candidate)
+            candidate = f"{base_name}_{counter}"
+            if candidate not in existing_node_names:
+                existing_node_names.add(candidate)
                 return candidate
         
         # Final fallback
-        raise RuntimeError(f"Unable to generate unique name for: {base_name}")
+        raise RuntimeError(f"Unable to generate unique node name for: {base_name}")
     
-    def infer_tensor_shape(tensor_name):
-        """Infer shape of a tensor from model info"""
-        # Check value_info
-        for vi in model.graph.value_info:
-            if vi.name == tensor_name:
-                return [dim.dim_value for dim in vi.type.tensor_type.shape.dim]
-        
-        # Check initializers
-        for init in model.graph.initializer:
-            if init.name == tensor_name:
-                return list(init.dims)
-        
-        # Check graph inputs
-        for inp in model.graph.input:
-            if inp.name == tensor_name:
-                return [dim.dim_value for dim in inp.type.tensor_type.shape.dim]
-        
-        return None
-    
-    def create_enhanced_bias_tensor(original_node, inputs, outputs, node_index, target_shape):
-        """Create a bias tensor with enhanced naming"""
-        
-        # Create enhanced name for bias
-        bias_base_name = f"{original_node.name}_zero_bias" if original_node.name else "auto_bias"
-        
-        bias_name = create_enhanced_name(
-            bias_base_name,
-            inputs,
-            outputs + [f"bias_for_{outputs[0]}"],  # Include bias info in outputs
-            node_index,
-            "bias"
-        )
-        
-        # Create zero tensor
-        zero_tensor = numpy_helper.from_array(
-            np.zeros(target_shape, dtype=np.float32),
-            name=bias_name
-        )
-        
-        return zero_tensor, bias_name
+    def inherit_description(original_node, new_node):
+        """Inherit description from original node to new node"""
+        if original_node.name in node_descriptions and node_descriptions[original_node.name]:
+            original_desc = node_descriptions[original_node.name]
+            inherited_desc = f"[Converted from FusedMatMul] {original_desc}"
+            desc_attr = helper.make_attribute("description", inherited_desc)
+            new_node.attribute.append(desc_attr)
+            print(f"    📝 Inherited description: {original_desc}")
+            return True
+        return False
     
     # Process each node in the graph
     fusedmatmul_count = 0
@@ -1710,95 +2084,55 @@ def convert_fusedmatmul_to_gemm(input_model_path, output_model_path):
             print(f"  Output: {output}")
             print(f"  Attributes: alpha={alpha}, transA={transA}, transB={transB}")
             
-            # Infer shapes for bias creation
-            a_shape = infer_tensor_shape(A)
-            b_shape = infer_tensor_shape(B)
-            
-            print(f"  Inferred shapes: A={a_shape}, B={b_shape}")
-            
-            # Calculate bias shape
-            if a_shape and b_shape:
-                # Apply transpose if needed
-                effective_a_shape = a_shape[::-1] if transA else a_shape
-                effective_b_shape = b_shape[::-1] if transB else b_shape
-                
-                # For matmul: [M,K] * [K,N] = [M,N], bias needs shape [N]
-                if len(effective_b_shape) >= 2:
-                    c_shape = [effective_b_shape[-1]]
-                elif len(effective_b_shape) == 1:
-                    c_shape = [effective_b_shape[0]]
-                else:
-                    c_shape = [1]  # Fallback
-            else:
-                c_shape = [1]  # Safe fallback
-            
-            print(f"  Calculated bias shape: {c_shape}")
-            
-            # Create enhanced bias tensor
-            bias_tensor, bias_name = create_enhanced_bias_tensor(
-                node, 
-                [A, B], 
-                [output], 
-                node_index, 
-                c_shape
-            )
-            new_initializers.append(bias_tensor)
-            
-            print(f"  Created bias tensor: {bias_name}")
-            
-            # Create enhanced Gemm node name
-            gemm_node_name = create_enhanced_name(
+            # Create simple unique Gemm node name
+            gemm_node_name = generate_unique_node_name(
                 node.name or "fusedmatmul_to_gemm",
-                [A, B, bias_name],
-                [output],
-                node_index,
-                "gemm"
+                existing_node_names
             )
             
-            # Create the Gemm node
+            # Create the Gemm node WITHOUT bias (only 2 inputs: A and B)
             gemm_node = helper.make_node(
                 "Gemm",
-                inputs=[A, B, bias_name],
+                inputs=[A, B],  # No bias input
                 outputs=[output],
                 name=gemm_node_name,
                 alpha=alpha,
-                beta=1.0,
+                beta=0.0,  # Set beta to 0 since no bias
                 transA=transA,
                 transB=transB
             )
             
+            # Inherit description from original FusedMatMul node
+            has_description = inherit_description(node, gemm_node)
+            
             new_nodes.append(gemm_node)
             
-            print(f"  -> Created Gemm node: {gemm_node_name}")
-            print(f"     Inputs: [{A}, {B}, {bias_name}]")
+            print(f"  -> Created No-Bias Gemm node: {gemm_node_name}")
+            print(f"     Inputs: [{A}, {B}]")  # No bias
             print(f"     Output: [{output}]")
+            print(f"     Beta: 0.0 (no bias)")
+            if has_description:
+                print(f"     Description: Inherited ✓")
             print("")
             
         else:
-            # Keep other nodes as they are, but ensure their names are unique
-            if node.name:
-                # Ensure node name is unique
-                unique_node_name = generate_absolutely_unique_name(node.name, existing_names)
-                if unique_node_name != node.name:
-                    print(f"Renamed node: {node.name} -> {unique_node_name}")
-                    node.name = unique_node_name
-            
+            # Keep other nodes as they are - do NOT rename existing nodes to avoid breaking references
             new_nodes.append(node)
     
-    # Create a new graph with updated nodes and initializers
+    # Create a new graph with updated nodes - keep everything else exactly the same
     new_graph = helper.make_graph(
         nodes=new_nodes,
         name=model.graph.name,
         inputs=model.graph.input,
         outputs=model.graph.output,
-        initializer=list(model.graph.initializer) + new_initializers,
+        initializer=model.graph.initializer,  # Keep original initializers unchanged
         value_info=model.graph.value_info
     )
     
     # Create a new model with the updated graph
     new_model = helper.make_model(
         new_graph,
-        producer_name="EnhancedFusedMatMul2Gemm",
+        producer_name="FusedMatMul2NoBiasGemm",
         opset_imports=model.opset_import,
         ir_version=model.ir_version
     )
@@ -1815,15 +2149,14 @@ def convert_fusedmatmul_to_gemm(input_model_path, output_model_path):
     
     print(f"="*60)
     print(f"✅ Conversion Summary:")
-    print(f"   - Converted {fusedmatmul_count} FusedMatMul nodes to Gemm")
-    print(f"   - Added {len(new_initializers)} new bias tensors")
+    print(f"   - Converted {fusedmatmul_count} FusedMatMul nodes to No-Bias Gemm")
+    print(f"   - No bias tensors created (bias-free operation)")
+    print(f"   - Descriptions preserved and inherited")
     print(f"   - Enhanced naming prevents conflicts")
     print(f"   - Saved to: {output_model_path}")
     print(f"="*60)
     
     return new_model
-
-
 
 def convert_sum_to_add(input_model_path, output_model_path):
     """
