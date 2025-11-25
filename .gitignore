@@ -23,3 +23,15 @@ Tests/Models/CCT/CCT/utils/__pycache__/helpers.cpython-310.pyc
 Tests/Models/CCT/CCT/utils/__pycache__/stochastic_depth.cpython-310.pyc
 Tests/Models/CCT/CCT/utils/__pycache__/tokenizer.cpython-310.pyc
 Tests/Models/CCT/CCT/utils/__pycache__/transformers.cpython-310.pyc
+Tests/Models/MI-BMInet/__pycache__/testinfergenerate.cpython-310.pyc
+Tests/Models/MI-BMInet/__pycache__/testtraingenerate.cpython-310.pyc
+Tests/Models/MI-BMInet/data/MNIST/raw/t10k-images-idx3-ubyte
+Tests/Models/MI-BMInet/data/MNIST/raw/t10k-images-idx3-ubyte.gz
+Tests/Models/MI-BMInet/data/MNIST/raw/t10k-labels-idx1-ubyte
+Tests/Models/MI-BMInet/data/MNIST/raw/t10k-labels-idx1-ubyte.gz
+Tests/Models/MI-BMInet/data/MNIST/raw/train-images-idx3-ubyte
+Tests/Models/MI-BMInet/data/MNIST/raw/train-images-idx3-ubyte.gz
+Tests/Models/MI-BMInet/data/MNIST/raw/train-labels-idx1-ubyte
+Tests/Models/MI-BMInet/data/MNIST/raw/train-labels-idx1-ubyte.gz
+Tests/Models/MI-BMInet/mi_bminet_model/__pycache__/__init__.cpython-310.pyc
+Tests/Models/MI-BMInet/mi_bminet_model/__pycache__/mi_bminet.cpython-310.pyc
