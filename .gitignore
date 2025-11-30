@@ -35,3 +35,6 @@ Tests/Models/MI-BMInet/data/MNIST/raw/train-labels-idx1-ubyte
 Tests/Models/MI-BMInet/data/MNIST/raw/train-labels-idx1-ubyte.gz
 Tests/Models/MI-BMInet/mi_bminet_model/__pycache__/__init__.cpython-310.pyc
 Tests/Models/MI-BMInet/mi_bminet_model/__pycache__/mi_bminet.cpython-310.pyc
+
+
+/app/Onnx4Deeploy/Tests/Models/MI-BMInet/onnx/*
