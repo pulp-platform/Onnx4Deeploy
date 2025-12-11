@@ -1,0 +1,10 @@
+convgradw:
+  output_grad_shape: [1, 4, 5, 5]       # 输出梯度 shape (NCHW format)
+  input_shape: [1, 4, 2, 2]            # 前向输入数据 shape (NCHW format)
+  weight_grad_shape: [4, 1, 2, 2]      # 权重梯度 shape (output_ch, input_ch_per_group, kH, kW)
+  kernel_shape: [2, 2]
+  strides: [1, 1]
+  pads: [1, 1, 1, 1]                    # top, left, bottom, right
+  dilations: [1, 1]
+  group: 4                              # Grouped convolution (e.g., depthwise when group=in_ch=out_ch)
+  opset_version: 13
