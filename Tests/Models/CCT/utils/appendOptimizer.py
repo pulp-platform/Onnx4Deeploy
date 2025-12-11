@@ -28,22 +28,58 @@ def add_sgd_nodes(input_model_path, output_model_path, learning_rate=0.01):
     
     # Find all gradient outputs
     grad_to_param_map = {}
-    
+
     for output_name in output_names:
         if "grad" in output_name.lower():
             print(f"Found gradient output: {output_name}")
-            
-            # Special case for classifier_fc_Gemm_Grad_dC_reduced -> classifier_fc_bias
-            if "classifier_fc_gemm_grad_dc_reduced" in output_name.lower():
-                if "classifier_fc_bias" in param_names:
-                    grad_to_param_map["classifier_fc_bias"] = output_name
+
+            # Special case for *_Gemm_Grad_dC_reduced -> *_bias
+            # This handles Gemm bias gradients like:
+            # - node_15_fc_Gemm_Grad_dC_reduced -> fc_bias
+            # - classifier_fc_Gemm_Grad_dC_reduced -> classifier_fc_bias
+            if "gemm_grad_dc_reduced" in output_name.lower():
+                # Extract the layer name from the gradient output
+                # e.g., "node_15_fc_Gemm_Grad_dC_reduced" -> "fc"
+                parts = output_name.lower().split("_gemm_grad_dc_reduced")[0]
+                # Remove "node_XX_" prefix if present
+                if parts.startswith("node_"):
+                    # Find the layer name after node_XX_
+                    parts = "_".join(parts.split("_")[2:])  # Skip "node" and number
+
+                # Try to match with *_bias parameters
+                bias_name = f"{parts}_bias"
+                matched = False
+                for param_name in param_names:
+                    if param_name.lower() == bias_name.lower():
+                        grad_to_param_map[param_name] = output_name
+                        print(f"  ✅ Matched {output_name} -> {param_name} (Gemm bias)")
+                        matched = True
+                        break
+
+                if matched:
                     continue
-            
+                else:
+                    print(f"  ⚠️  Could not match Gemm bias gradient: {output_name}")
+
             # Regular case: param_name_grad -> param_name
-            for param_name in param_names:
-                if param_name.lower() in output_name.lower() or output_name.lower().startswith(param_name.lower()):
-                    grad_to_param_map[param_name] = output_name
-                    break
+            # Remove _grad suffix and match exactly
+            if output_name.lower().endswith("_grad"):
+                param_name_candidate = output_name[:-5]  # Remove "_grad"
+
+                # Try exact match first
+                if param_name_candidate in param_names:
+                    grad_to_param_map[param_name_candidate] = output_name
+                    print(f"  ✅ Matched {output_name} -> {param_name_candidate}")
+                    continue
+
+                # Try case-insensitive exact match
+                for param_name in param_names:
+                    if param_name.lower() == param_name_candidate.lower():
+                        grad_to_param_map[param_name] = output_name
+                        print(f"  ✅ Matched {output_name} -> {param_name}")
+                        break
+                else:
+                    print(f"  ⚠️  No matching parameter found for {output_name}")
     
     # Add SGD update nodes for each parameter with a gradient
     new_nodes = []

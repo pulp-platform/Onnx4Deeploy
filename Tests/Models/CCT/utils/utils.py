@@ -163,7 +163,217 @@ def load_train_config(config_filename="../config.yaml"):
         config = yaml.safe_load(f).get("training", {})
     
     return config.get("learning_rate", 0.01)
+
+
+def compare_onnx_models(model1_path, model2_path, name1="Model 1", name2="Model 2"):
+    """
+    Compare two ONNX models and report differences in nodes, inputs, outputs.
+    """
+    model1 = onnx.load(model1_path)
+    model2 = onnx.load(model2_path)
+
+    graph1 = model1.graph
+    graph2 = model2.graph
+
+    print(f"\n{'='*60}")
+    print(f"Comparing {name1} vs {name2}")
+    print(f"{'='*60}")
+
+    # Compare node counts
+    print(f"\n📊 Node Statistics:")
+    print(f"  {name1}: {len(graph1.node)} nodes")
+    print(f"  {name2}: {len(graph2.node)} nodes")
+    print(f"  Difference: {len(graph2.node) - len(graph1.node):+d} nodes")
+
+    # Compare node types
+    types1 = {}
+    types2 = {}
+    for node in graph1.node:
+        types1[node.op_type] = types1.get(node.op_type, 0) + 1
+    for node in graph2.node:
+        types2[node.op_type] = types2.get(node.op_type, 0) + 1
+
+    all_types = set(types1.keys()) | set(types2.keys())
+
+    print(f"\n📋 Node Type Changes:")
+    for op_type in sorted(all_types):
+        count1 = types1.get(op_type, 0)
+        count2 = types2.get(op_type, 0)
+        if count1 != count2:
+            print(f"  {op_type}: {count1} → {count2} ({count2 - count1:+d})")
+
+    # Compare graph outputs
+    print(f"\n🎯 Graph Outputs:")
+    print(f"  {name1}: {len(graph1.output)} outputs")
+    outputs1_names = [out.name for out in graph1.output]
+    for i, out in enumerate(outputs1_names[:10]):  # Show first 10
+        print(f"    - {out}")
+    if len(outputs1_names) > 10:
+        print(f"    ... and {len(outputs1_names) - 10} more")
+
+    print(f"  {name2}: {len(graph2.output)} outputs")
+    outputs2_names = [out.name for out in graph2.output]
+    for i, out in enumerate(outputs2_names[:10]):  # Show first 10
+        print(f"    - {out}")
+    if len(outputs2_names) > 10:
+        print(f"    ... and {len(outputs2_names) - 10} more")
+
+    # Check for missing outputs
+    outputs1 = set(outputs1_names)
+    outputs2 = set(outputs2_names)
+
+    missing = outputs1 - outputs2
+    added = outputs2 - outputs1
+
+    if missing:
+        print(f"\n⚠️  Missing outputs in {name2}: {len(missing)} outputs lost")
+        for out in list(missing)[:20]:  # Show first 20
+            print(f"    - {out}")
+        if len(missing) > 20:
+            print(f"    ... and {len(missing) - 20} more")
+
+    if added:
+        print(f"\n✨ New outputs in {name2}: {len(added)} outputs added")
+        for out in list(added)[:20]:  # Show first 20
+            print(f"    - {out}")
+        if len(added) > 20:
+            print(f"    ... and {len(added) - 20} more")
+
+    print(f"{'='*60}\n")
+
+    return {
+        'node_diff': len(graph2.node) - len(graph1.node),
+        'missing_outputs': list(missing),
+        'added_outputs': list(added),
+        'types_diff': {k: (types2.get(k, 0) - types1.get(k, 0)) for k in all_types if types1.get(k, 0) != types2.get(k, 0)}
+    }
+
+
+def split_convgrad_nodes(input_onnx, output_onnx):
+    """
+    Split ConvGrad nodes with 3 outputs into 3 separate nodes:
+    ConvGradX, ConvGradW, and ConvGradB.
     
+    Each node only receives the inputs it actually needs:
+    - ConvGradX: [dY, W] - computes input gradient
+    - ConvGradW: [dY, X] - computes weight gradient  
+    - ConvGradB: [dY] - computes bias gradient
+    """
+    model = onnx.load(input_onnx)
+    graph = model.graph
+
+    # Store original graph outputs to preserve them
+    original_graph_outputs = set(out.name for out in graph.output)
+
+    nodes_to_add = []
+    nodes_to_remove = []
+
+    # Track all output tensors that should be preserved
+    preserved_outputs = {}
+
+    for node in graph.node:
+        if node.op_type == "ConvGrad":
+            # Get inputs: dY, X, W
+            if len(node.input) < 3:
+                continue
+
+            dY = node.input[0]  # Output gradient
+            X = node.input[1]   # Forward input
+            W = node.input[2]   # Weight
+
+            # Get outputs (filter out empty strings)
+            outputs = [out for out in node.output if out != '']
+
+            # Must have at least 2 outputs (dX, dW) to split
+            if len(outputs) < 2:
+                continue
+
+            # Copy attributes from original node
+            attrs = {attr.name: attr for attr in node.attribute}
+
+            # Create ConvGradX node (computes gradient w.r.t. input)
+            # Only needs: output gradient (dY) and weight (W)
+            convgrad_x = helper.make_node(
+                'ConvGradX',
+                inputs=[dY, W],  # ConvTranspose-like operation
+                outputs=[outputs[0]],  # dX
+                name=node.name + '_X'
+            )
+            # Copy attributes
+            for attr_name, attr in attrs.items():
+                convgrad_x.attribute.append(copy.deepcopy(attr))
+            nodes_to_add.append(convgrad_x)
+
+            # Track if this output is a graph output
+            if outputs[0] in original_graph_outputs:
+                preserved_outputs[outputs[0]] = True
+
+            # Create ConvGradW node (computes gradient w.r.t. weight)
+            # Only needs: output gradient (dY) and forward input (X)
+            convgrad_w = helper.make_node(
+                'ConvGradW',
+                inputs=[dY, X],  # Correlation operation
+                outputs=[outputs[1]],  # dW
+                name=node.name + '_W'
+            )
+            # Copy attributes
+            for attr_name, attr in attrs.items():
+                convgrad_w.attribute.append(copy.deepcopy(attr))
+            nodes_to_add.append(convgrad_w)
+
+            # Track if this output is a graph output
+            if outputs[1] in original_graph_outputs:
+                preserved_outputs[outputs[1]] = True
+
+            # Create ConvGradB node if bias gradient exists
+            # Only needs: output gradient (dY)
+            if len(outputs) >= 3:
+                convgrad_b = helper.make_node(
+                    'ConvGradB',
+                    inputs=[dY],  # Sum over spatial dimensions
+                    outputs=[outputs[2]],  # dB
+                    name=node.name + '_B'
+                )
+                # Copy attributes (though ConvGradB may not need all of them)
+                for attr_name, attr in attrs.items():
+                    convgrad_b.attribute.append(copy.deepcopy(attr))
+                nodes_to_add.append(convgrad_b)
+
+                # Track if this output is a graph output
+                if outputs[2] in original_graph_outputs:
+                    preserved_outputs[outputs[2]] = True
+
+            # Mark original node for removal
+            nodes_to_remove.append(node)
+
+    # Remove original ConvGrad nodes
+    for node in nodes_to_remove:
+        graph.node.remove(node)
+
+    # Add new split nodes
+    graph.node.extend(nodes_to_add)
+
+    # Save the modified model
+    onnx.save(model, output_onnx)
+
+    # Verify no graph outputs were lost
+    new_model = onnx.load(output_onnx)
+    new_graph_outputs = set(out.name for out in new_model.graph.output)
+    lost_outputs = original_graph_outputs - new_graph_outputs
+
+    if lost_outputs:
+        print(f"⚠️  WARNING: Lost {len(lost_outputs)} graph outputs after ConvGrad split:")
+        for out in list(lost_outputs)[:10]:
+            print(f"    - {out}")
+        if len(lost_outputs) > 10:
+            print(f"    ... and {len(lost_outputs) - 10} more")
+    else:
+        print(f"✅ All {len(original_graph_outputs)} graph outputs preserved after ConvGrad split")
+
+    print(f"✅ Split {len(nodes_to_remove)} ConvGrad node(s) into {len(nodes_to_add)} separate gradient nodes")
+    if preserved_outputs:
+        print(f"   {len(preserved_outputs)} ConvGrad outputs are graph outputs")
+
 
 def run_train_onnx_optimization(onnx_train_file, onnx_output_file):
 
@@ -191,9 +401,14 @@ def run_train_onnx_optimization(onnx_train_file, onnx_output_file):
         f"✅ Successfully converted Squeeze inputs to attributes. Saved as {onnx_output_file}"
     )
 
-    remove_identity_reducesum(onnx_output_file, onnx_output_file)
+    convert_reducesum_to_reshape(onnx_output_file, onnx_output_file)
     print(
-        f"✅ Successfully removed Identity and ReduceSum nodes. Saved as {onnx_output_file}"
+        f"✅ Successfully converted ReduceSum to ReduceSum+Reshape. Saved as {onnx_output_file}"
+    )
+
+    remove_identity_nodes(onnx_output_file, onnx_output_file)
+    print(
+        f"✅ Successfully removed Identity nodes. Saved as {onnx_output_file}"
     )
 
     convert_reducesum_axes_to_attr(onnx_output_file, onnx_output_file)
@@ -214,6 +429,11 @@ def run_train_onnx_optimization(onnx_train_file, onnx_output_file):
     rename_softmaxgrad_op(onnx_output_file, onnx_output_file)
     print(
         f"✅ Successfully renamed SoftmaxGrad nodes. Saved as {onnx_output_file}"
+    )
+
+    split_convgrad_nodes(onnx_output_file, onnx_output_file)
+    print(
+        f"✅ Successfully split ConvGrad nodes into ConvGradX/W/B. Saved as {onnx_output_file}"
     )
 
     remove_softmax_loss_outputs(onnx_output_file, onnx_output_file)
@@ -237,10 +457,15 @@ def run_train_onnx_optimization(onnx_train_file, onnx_output_file):
     print(
         f"✅ Successfully removed BiasGeluGradFusion. Saved as {onnx_output_file}"
     )
-    
+
 
     # unify_gemm_input_dims(onnx_output_file, onnx_output_file)
     # print(f"✅ Successfully unified GEMM input dimensions. Saved as {onnx_output_file}")
+
+    # Compare input and output models to check for any lost nodes/outputs
+    print(f"\n🔍 Verifying optimization results...")
+    compare_onnx_models(onnx_train_file, onnx_output_file,
+                       name1="network_train.onnx", name2="network.onnx")
 
     fuse_matmul_add_to_gemm(onnx_output_file, onnx_output_file)
     print(

@@ -687,7 +687,6 @@ def fuse_matmul_add_to_gemm(input_model_path, output_model_path):
         print(f"    GEMM inputs: A={input_A}, B={input_B}, bias={input_C}")
         print(f"    GEMM output: {add_node.output[0]}")
         print(f"    GEMM name: {add_node.name}")
-    
     # Apply changes
     print(f"\n📝 Updating graph...")
     
@@ -1555,249 +1554,100 @@ def optimize_reshape_fusion(input_model_path: str, output_model_path: str) -> No
     print(f"Optimized model saved to: {output_model_path}")
 
 
-def remove_identity_reducesum(input_model_path, output_model_path):
+def convert_reducesum_to_reshape(input_model_path, output_model_path):
     """
-    Fixed version of remove_identity_reducesum to handle multiple levels of Identity
-    and transform appropriate ReduceSum nodes to Reshape operations
+    Convert ReduceSum nodes (with keepdims=0) to ReduceSum (keepdims=1) + Reshape.
+    This makes the shape transformation explicit and easier for tiling optimization.
     """
     import onnx
+    from onnx import helper, numpy_helper
     import numpy as np
-    from onnx import shape_inference, helper, TensorProto
-    
-    # Load the model and infer shapes
+
     model = onnx.load(input_model_path)
-    try:
-        model = shape_inference.infer_shapes(model)
-    except Exception as e:
-        print(f"Warning: Shape inference failed: {e}. Continuing without shape information.")
-    
     graph = model.graph
-    
-    # Build node mapping and input-output relationships
-    node_map = {node.name: node for node in graph.node}
-    output_to_node = {}  # maps output name to producing node
-    input_to_nodes = {}  # maps input name to consuming nodes
-    
-    for node in graph.node:
-        for output in node.output:
-            output_to_node[output] = node
-        
-        for input_name in node.input:
-            if input_name not in input_to_nodes:
-                input_to_nodes[input_name] = []
-            input_to_nodes[input_name].append(node)
-    
-    # Store tensor shapes
-    shape_info = {}
-    for info in list(graph.value_info) + list(graph.input) + list(graph.output):
-        if hasattr(info.type.tensor_type.shape, 'dim'):
-            dims = []
-            for dim in info.type.tensor_type.shape.dim:
-                if dim.dim_value:
-                    dims.append(dim.dim_value)
-                else:
-                    dims.append(-1)
-            shape_info[info.name] = dims
-    
-    # Get initializer shapes
-    for initializer in graph.initializer:
-        shape_info[initializer.name] = list(initializer.dims)
-    
-    # Identity resolution: build a complete mapping directly to the source
-    replacement_map = {}
-    identity_nodes = []
-    
-    # First pass: collect all Identity nodes
-    for node in graph.node:
-        if node.op_type == "Identity":
-            identity_nodes.append(node)
-    
-    # Function to recursively resolve Identity chains
-    def resolve_identity_source(tensor_name):
-        """Recursively resolve the source of a tensor through Identity nodes"""
-        if tensor_name in output_to_node and output_to_node[tensor_name].op_type == "Identity":
-            identity_node = output_to_node[tensor_name]
-            source_name = identity_node.input[0]
-            # Recursive call to handle chained identities
-            return resolve_identity_source(source_name)
-        return tensor_name
-    
-    # Build replacement map by resolving full Identity chains at once
-    for node in identity_nodes:
-        output_name = node.output[0]
-        source_name = resolve_identity_source(node.input[0])  # Get the ultimate source
-        replacement_map[output_name] = source_name
-    
-    # Process ReduceSum nodes
-    reducesum_nodes = []
-    reshape_nodes_to_add = []
-    
+
+    nodes_to_add = []
+    nodes_to_remove = []
+
+    print("\n🔍 Converting ReduceSum nodes to ReduceSum + Reshape:")
+
     for node in graph.node:
         if node.op_type == "ReduceSum":
-            input_name = node.input[0]
-            output_name = node.output[0]
-            
-            # Resolve input if it's from an Identity node
-            if input_name in replacement_map:
-                input_name = replacement_map[input_name]
-            
-            # Check for dimension 1 reduction with keepdims=0
-            keepdims = 1  # Default value
+            # Check if keepdims is 0
+            keepdims = 1  # default value in ONNX
             for attr in node.attribute:
                 if attr.name == "keepdims":
                     keepdims = attr.i
                     break
-            
-            # Get reduction axes
-            axes = []
-            for attr in node.attribute:
-                if attr.name == "axes":
-                    axes = list(attr.ints)
-                    break
-            
-            # If opset >= 13, axes might be an input
-            if len(node.input) > 1 and not axes:
-                axes_name = node.input[1]
-                for initializer in graph.initializer:
-                    if initializer.name == axes_name:
-                        axes = onnx.numpy_helper.to_array(initializer).tolist()
-                        if not isinstance(axes, list):
-                            axes = [axes]
+
+            if keepdims == 0:
+                print(f"\n  Processing: {node.name}")
+                print(f"    Original output: {node.output[0]}")
+
+                # Get the axes being reduced
+                axes = None
+                for attr in node.attribute:
+                    if attr.name == "axes":
+                        axes = list(attr.ints)
                         break
-            
-            # Get input shape
-            if input_name in shape_info:
-                input_shape = shape_info[input_name]
-                
-                # Check if all reduction axes have dimension 1
-                all_dim_one = True
-                for axis in axes:
-                    # Handle negative axis
-                    if axis < 0:
-                        axis = len(input_shape) + axis
-                    
-                    if 0 <= axis < len(input_shape) and input_shape[axis] == 1:
-                        continue
-                    else:
-                        all_dim_one = False
-                        break
-                
-                if all_dim_one and axes:
-                    if keepdims == 1:
-                        # Simple replacement case
-                        replacement_map[output_name] = input_name
-                        reducesum_nodes.append(node)
-                    elif keepdims == 0:
-                        # Need to add a Reshape node
-                        # Calculate output shape by removing dimensions with size 1
-                        output_shape = []
-                        for i, dim in enumerate(input_shape):
-                            if i not in axes and (i - len(input_shape)) not in axes:
-                                output_shape.append(dim)
-                        
-                        # Create shape tensor for Reshape
-                        shape_tensor_name = f"{node.name}_shape"
-                        shape_tensor = helper.make_tensor(
-                            name=shape_tensor_name,
-                            data_type=TensorProto.INT64,
-                            dims=[len(output_shape)],
-                            vals=output_shape
-                        )
-                        
-                        # Create Reshape node
-                        reshape_node = helper.make_node(
-                            "Reshape",
-                            inputs=[input_name, shape_tensor_name],
-                            outputs=[output_name],
-                            name=f"{node.name}_reshape"
-                        )
-                        
-                        # Store for later addition
-                        reshape_nodes_to_add.append((reshape_node, shape_tensor))
-                        reducesum_nodes.append(node)
-    
-    # Update all node inputs using the complete replacement mapping
-    for node in graph.node:
-        if node not in identity_nodes and node not in reducesum_nodes:
-            modified = False
-            for i, input_name in enumerate(node.input):
-                # Apply replacement if needed, with special attention to Reshape nodes
-                if input_name in replacement_map:
-                    node.input[i] = replacement_map[input_name]
-                    modified = True
-                    
-                    # Special handling for Reshape nodes to ensure shape info is preserved
-                    if node.op_type == "Reshape" and i == 0:  # If this is the data input to Reshape
-                        # If a Reshape node's input was replaced, ensure shape remains correct
-                        if len(node.input) > 1:  # Has shape input
-                            shape_input = node.input[1]
-                            # Verify shape input exists
-                            shape_exists = False
-                            for init in graph.initializer:
-                                if init.name == shape_input:
-                                    shape_exists = True
-                                    break
-                            
-                            if not shape_exists:
-                                print(f"Warning: Reshape node {node.name} has missing shape input after Identity removal")
-                                # Attempt to create a shape input if missing
-                                if node.output[0] in shape_info:
-                                    output_shape = shape_info[node.output[0]]
-                                    shape_tensor_name = f"{node.name}_shape_fixed"
-                                    shape_tensor = helper.make_tensor(
-                                        name=shape_tensor_name,
-                                        data_type=TensorProto.INT64,
-                                        dims=[len(output_shape)],
-                                        vals=output_shape
-                                    )
-                                    graph.initializer.append(shape_tensor)
-                                    node.input[1] = shape_tensor_name
-                                    print(f"  Fixed: Added shape tensor {shape_tensor_name} with shape {output_shape}")
-            
-            if modified and node.op_type == "Reshape":
-                print(f"Updated inputs for Reshape node: {node.name}")
-                print(f"  New inputs: {node.input}")
-    
-    # Update graph outputs
-    for output in graph.output:
-        if output.name in replacement_map:
-            # Find the value_info for the replacement tensor
-            replacement_info = None
-            for info in graph.value_info:
-                if info.name == replacement_map[output.name]:
-                    replacement_info = info
-                    break
-            
-            if replacement_info:
-                # Copy type information from the replacement
-                output.type.CopyFrom(replacement_info.type)
-            
-            # Update name
-            old_name = output.name
-            output.name = replacement_map[old_name]
-            print(f"Updated graph output: {old_name} -> {output.name}")
-    
-    # Remove nodes and add new reshape nodes
-    new_nodes = [node for node in graph.node if node not in identity_nodes and node not in reducesum_nodes]
-    
-    # Add shape tensors to initializers and reshape nodes
-    for reshape_node, shape_tensor in reshape_nodes_to_add:
-        graph.initializer.append(shape_tensor)
-        new_nodes.append(reshape_node)
-    
-    # Clear and re-add nodes
-    graph.ClearField("node")
-    graph.node.extend(new_nodes)
-    
-    # Save model
+
+                if axes is None:
+                    print(f"    ⚠️  No axes specified, skipping")
+                    continue
+
+                print(f"    Reducing over axes: {axes}")
+
+                # Create new ReduceSum with keepdims=1
+                intermediate_output = node.output[0] + "_keepdims"
+
+                # Create new ReduceSum node with keepdims=1
+                new_reducesum = helper.make_node(
+                    'ReduceSum',
+                    inputs=node.input,
+                    outputs=[intermediate_output],
+                    name=node.name,
+                    axes=axes,
+                    keepdims=1
+                )
+
+                # Create Reshape node to remove the reduced dimensions
+                # Use -1 to indicate dynamic shape inference
+                target_shape = np.array([-1], dtype=np.int64)
+                shape_constant = helper.make_tensor(
+                    name=node.name + '_shape',
+                    data_type=onnx.TensorProto.INT64,
+                    dims=[1],
+                    vals=target_shape
+                )
+
+                # Add shape constant to initializers if not already present
+                if not any(init.name == shape_constant.name for init in graph.initializer):
+                    graph.initializer.append(shape_constant)
+
+                # Create Reshape node
+                reshape_node = helper.make_node(
+                    'Reshape',
+                    inputs=[intermediate_output, shape_constant.name],
+                    outputs=node.output,  # Keep original output name
+                    name=node.name + '_Reshape'
+                )
+
+                nodes_to_add.append((new_reducesum, reshape_node))
+                nodes_to_remove.append(node)
+                print(f"    ✅ Split into: {new_reducesum.name} (keepdims=1) → {reshape_node.name}")
+
+    # Remove old nodes and add new ones
+    for node in nodes_to_remove:
+        graph.node.remove(node)
+
+    for new_reducesum, reshape_node in nodes_to_add:
+        graph.node.extend([new_reducesum, reshape_node])
+
     onnx.save(model, output_model_path)
-    
-    print(f"Saved to {output_model_path}")
-    print(f"Removed {len(identity_nodes)} Identity nodes")
-    print(f"Removed {len(reducesum_nodes)} ReduceSum nodes")
-    print(f"Added {len(reshape_nodes_to_add)} Reshape nodes")
-    
+    print(f"\n✅ Converted {len(nodes_to_add)} ReduceSum node(s) to ReduceSum + Reshape")
+
     return model
+
 
 def convert_reducesum_axes_to_attr(input_file: str, output_file: str):
     model = onnx.load(input_file)
@@ -2694,3 +2544,54 @@ def process_layernormgrad_nodes(model_path, output_path):
     # Save the modified model
     onnx.save(model, output_path)
     print(f"Modified model saved to {output_path}")
+
+def remove_identity_nodes(input_onnx, output_onnx):
+    """
+    Remove Identity nodes from the ONNX graph.
+    Identity nodes just pass through their input without modification.
+    """
+    model = onnx.load(input_onnx)
+    graph = model.graph
+    
+    # Track nodes to remove
+    nodes_to_remove = []
+    
+    # Build a mapping of tensor names to their replacement
+    tensor_replacements = {}
+    
+    for node in graph.node:
+        if node.op_type == "Identity":
+            # Identity node has 1 input and 1 output
+            if len(node.input) == 1 and len(node.output) == 1:
+                input_name = node.input[0]
+                output_name = node.output[0]
+                
+                # Map output to input (bypass the Identity node)
+                tensor_replacements[output_name] = input_name
+                nodes_to_remove.append(node)
+                print(f"Removing Identity node '{node.name}': {output_name} -> {input_name}")
+    
+    # Remove Identity nodes
+    for node in nodes_to_remove:
+        graph.node.remove(node)
+    
+    # Update all references to removed Identity outputs
+    for node in graph.node:
+        for i, input_name in enumerate(node.input):
+            if input_name in tensor_replacements:
+                node.input[i] = tensor_replacements[input_name]
+                print(f"  Updated node '{node.name}' input: {input_name} -> {tensor_replacements[input_name]}")
+    
+    # Update graph outputs if they reference Identity outputs
+    for output in graph.output:
+        if output.name in tensor_replacements:
+            old_name = output.name
+            output.name = tensor_replacements[old_name]
+            print(f"  Updated graph output: {old_name} -> {output.name}")
+    
+    # Save the modified model
+    onnx.save(model, output_onnx)
+    
+    print(f"✅ Removed {len(nodes_to_remove)} Identity node(s)")
+    
+    return model
