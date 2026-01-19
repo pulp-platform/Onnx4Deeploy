@@ -1,10 +1,59 @@
+# Pointwise Convolution (1x1) Weight Gradient
 convgradw:
-  output_grad_shape: [1, 4, 5, 5]       # 输出梯度 shape (NCHW format)
-  input_shape: [1, 4, 2, 2]            # 前向输入数据 shape (NCHW format)
-  weight_grad_shape: [4, 1, 2, 2]      # 权重梯度 shape (output_ch, input_ch_per_group, kH, kW)
-  kernel_shape: [2, 2]
+  # output_grad_shape: [1, 32, 14, 14]     # (N, C_out, H_out, W_out)
+  # input_shape:       [1, 16, 14, 14]     # (N, C_in, H_in, W_in) - same H,W as output for 1x1 conv
+  # weight_grad_shape: [32, 16, 1, 1]      # (C_out, C_in, 1, 1) - pointwise kernel
+  # kernel_shape: [1, 1]                    # 1x1 kernel for pointwise conv
+  # strides: [1, 1]
+  # pads: [0, 0, 0, 0]                      # no padding needed for 1x1
+  # dilations: [1, 1]
+  # group: 1                                # standard convolution (not depthwise)
+  # opset_version: 13
+
+# Depthwise Convolution Weight Gradient
+# convgradw:
+# convgradw:
+  output_grad_shape: [1, 8, 64, 64]     # (N, C_out, H_out, W_out)
+  input_shape:       [1, 8, 64, 64]     # (N, C_in, H_in, W_in)
+  weight_grad_shape: [8, 1, 3, 3]       # (C_out, C_in/group, kH, kW)
+  kernel_shape: [3, 3]
   strides: [1, 1]
-  pads: [1, 1, 1, 1]                    # top, left, bottom, right
+  # 修正点 1：为了匹配 64->64 的尺寸，必须设置为 Same Padding
+  # ONNX 中 pads 的顺序通常是 [top, left, bottom, right]
+  pads: [1, 1, 1, 1]                    
   dilations: [1, 1]
-  group: 4                              # Grouped convolution (e.g., depthwise when group=in_ch=out_ch)
+  group: 8                              # Depthwise 模式正确
   opset_version: 13
+
+
+# convgradw:
+#   output_grad_shape: [1, 16, 14, 14]     # (N, C_out, H_out, W_out)
+#   input_shape:       [1, 16, 16, 16]     # (N, C_in, H_in, W_in)
+#   weight_grad_shape: [16, 16, 3, 3]       # (C_out, C_in/group, kH, kW)
+#   kernel_shape: [3, 3]
+#   strides: [1, 1]
+#   pads: [0, 0, 0, 0]                      # same padding
+#   dilations: [1, 1]
+#   group: 1                                # depthwise: group == C_in == C_out
+#   opset_version: 13
+
+# convgradw:
+#   output_grad_shape: [1, 2, 14, 14]     # (N, C_out, H_out, W_out)
+#   input_shape:       [1, 2, 16, 16]     # (N, C_in, H_in, W_in)
+#   weight_grad_shape: [2, 2, 3, 3]       # (C_out, C_in/group, kH, kW)
+#   kernel_shape: [3, 3]
+#   strides: [1, 1]
+#   pads: [0, 0, 0, 0]                      # same padding
+#   dilations: [1, 1]
+#   group: 1                                # depthwise: group == C_in == C_out
+#   opset_version: 13
+
+  # output_grad_shape: [1, 16, 1, 227]     # (N, C_out, H_out, W_out)
+  # input_shape:       [1, 16, 1, 227]     # (N, C_in, H_in, W_in)
+  # weight_grad_shape: [16, 16, 1, 1]       # (C_out, C_in/group, kH, kW)
+  # kernel_shape: [1, 1]
+  # strides: [1, 1]
+  # pads: [0, 0, 0, 0]                      # same padding
+  # dilations: [1, 1]
+  # group: 1                                # depthwise: group == C_in == C_out
+  # opset_version: 13

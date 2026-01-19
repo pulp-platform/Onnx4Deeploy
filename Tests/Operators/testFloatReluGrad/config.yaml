@@ -1,2 +1,2 @@
 relugrad:
-  input_shape: [1, 64, 32, 32]  # Shape for gradient and original input
+  input_shape: [1, 16, 1, 227]  # Shape for gradient and original input

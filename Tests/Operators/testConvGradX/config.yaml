@@ -1,10 +1,41 @@
 convgradx:
-  input_grad_shape: [1, 4, 4, 4]        # 输出梯度 shape (NCHW format)
-  input_data_shape: [1, 4, 4, 4]        # 原始输入数据 shape (NCHW format)
-  weight_shape: [4, 1, 3, 3]            # 权重 shape (output_ch, input_ch_per_group, kH, kW)
-  kernel_shape: [3, 3]
-  strides: [1, 1]
-  pads: [1, 1, 1, 1]                    # top, left, bottom, right
+  # output_grad_shape: [1, 32, 28, 40]    # output_grad (dY): [N, C_out, H_out, W_out]
+  # input_grad_shape: [1, 32, 32, 44]     # input_grad (dX): [N, C_in, H_in, W_in]
+  # weight_shape: [32, 32, 5, 5]          # weight: [C_out, C_in_per_group, kH, kW]
+  # kernel_shape: [5, 5]
+  # strides: [1, 1]                        # MUST be 1 (pulptrainlib limitation)
+  # pads: [0, 0, 0, 0]                     # MUST be 0 (pulptrainlib limitation)
+  # dilations: [1, 1]
+  # group: 1                               # standard conv: group = 1
+  # opset_version: 13
+
+# convgradx_min_tile2:
+  # output_grad_shape: [1, 8, 1, 2000]    # dY: [N, C_out, H_out, W_out]
+  # input_grad_shape:  [1, 1, 1, 2063]    # dX: [N, C_in, H_in, W_in]
+  # weight_shape:      [8, 1, 1, 64]      # W:  [C_out, C_in, kH, kW]
+  # kernel_shape:      [1, 64]
+  # strides:           [1, 1]
+  # pads:              [0, 0, 0, 0]
+  # dilations:         [1, 1]
+  # group:             1
+  # opset_version:     13
+
+  # output_grad_shape: [1, 2, 3, 3]    # output_grad (dY): [N, C_out, H_out, W_out]
+  # input_grad_shape: [1, 2, 4, 4]     # input_grad (dX): [N, C_in, H_in, W_in]
+  # weight_shape: [2, 1, 2, 2]          # weight: [C_out, C_in_per_group, kH, kW]
+  # kernel_shape: [2, 2]
+  # strides: [1, 1]                        # MUST be 1 (pulptrainlib limitation)
+  # pads: [0, 0, 0, 0]                     # MUST be 0 (pulptrainlib limitation)
+  # dilations: [1, 1]
+  # group: 2                               # standard conv: group = 1
+  # opset_version: 13
+
+  output_grad_shape: [1, 16, 1, 227]    # output_grad (dY): [N, C_out, H_out, W_out]
+  input_grad_shape: [1, 16, 1, 227]     # input_grad (dX): [N, C_in, H_in, W_in]
+  weight_shape: [16, 16, 1, 1]          # weight: [C_out, C_in_per_group, kH, kW]
+  kernel_shape: [1, 1]
+  strides: [1, 1]                        # MUST be 1 (pulptrainlib limitation)
+  pads: [0, 0, 0, 0]                     # MUST be 0 (pulptrainlib limitation)
   dilations: [1, 1]
-  group: 4
+  group: 1                               # standard conv: group = 1
   opset_version: 13

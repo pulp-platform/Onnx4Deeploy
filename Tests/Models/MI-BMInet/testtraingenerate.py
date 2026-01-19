@@ -234,16 +234,14 @@ def generate_mi_bminet_training_onnx(save_path=None):
             # Example: Train only the final classifier
             "fc_weight",
             "fc_bias",
-
-            # Example: Train all Conv layers
-            "conv1_weight",
-            "conv1_bias",
-            "conv2_weight",
-            "conv2_bias",
-            "sep_conv1_weight",
-            "sep_conv1_bias",
-            "sep_conv2_weight",
-            "sep_conv2_bias",
+            # "conv1_weight",
+            # "conv1_bias",
+            # "conv2_weight",
+            # "conv2_bias",
+            # "sep_conv1_weight",
+            # "sep_conv1_bias",
+            # "sep_conv2_weight",
+            # "sep_conv2_bias",
         ]
     ]
 

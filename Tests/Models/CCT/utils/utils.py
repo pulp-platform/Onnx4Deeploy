@@ -281,57 +281,62 @@ def split_convgrad_nodes(input_onnx, output_onnx):
             X = node.input[1]   # Forward input
             W = node.input[2]   # Weight
 
-            # Get outputs (filter out empty strings)
-            outputs = [out for out in node.output if out != '']
+            # Get outputs - keep original positions to avoid index misalignment
+            # In ONNX, empty strings indicate unused outputs
+            # node.output[0] = dX (gradient w.r.t. input)
+            # node.output[1] = dW (gradient w.r.t. weight)
+            # node.output[2] = dB (gradient w.r.t. bias, optional)
 
-            # Must have at least 2 outputs (dX, dW) to split
-            if len(outputs) < 2:
+            # Check if we have enough outputs
+            if len(node.output) < 2:
                 continue
 
             # Copy attributes from original node
             attrs = {attr.name: attr for attr in node.attribute}
 
-            # Create ConvGradX node (computes gradient w.r.t. input)
-            # Only needs: output gradient (dY) and weight (W)
-            convgrad_x = helper.make_node(
-                'ConvGradX',
-                inputs=[dY, W],  # ConvTranspose-like operation
-                outputs=[outputs[0]],  # dX
-                name=node.name + '_X'
-            )
-            # Copy attributes
-            for attr_name, attr in attrs.items():
-                convgrad_x.attribute.append(copy.deepcopy(attr))
-            nodes_to_add.append(convgrad_x)
+            # Create ConvGradX node if dX output exists (index 0)
+            if len(node.output) > 0 and node.output[0] != '':
+                dX_output = node.output[0]
+                convgrad_x = helper.make_node(
+                    'ConvGradX',
+                    inputs=[dY, W],  # ConvTranspose-like operation
+                    outputs=[dX_output],  # dX
+                    name=node.name + '_X'
+                )
+                # Copy attributes
+                for attr_name, attr in attrs.items():
+                    convgrad_x.attribute.append(copy.deepcopy(attr))
+                nodes_to_add.append(convgrad_x)
 
-            # Track if this output is a graph output
-            if outputs[0] in original_graph_outputs:
-                preserved_outputs[outputs[0]] = True
+                # Track if this output is a graph output
+                if dX_output in original_graph_outputs:
+                    preserved_outputs[dX_output] = True
 
-            # Create ConvGradW node (computes gradient w.r.t. weight)
-            # Only needs: output gradient (dY) and forward input (X)
-            convgrad_w = helper.make_node(
-                'ConvGradW',
-                inputs=[dY, X],  # Correlation operation
-                outputs=[outputs[1]],  # dW
-                name=node.name + '_W'
-            )
-            # Copy attributes
-            for attr_name, attr in attrs.items():
-                convgrad_w.attribute.append(copy.deepcopy(attr))
-            nodes_to_add.append(convgrad_w)
+            # Create ConvGradW node if dW output exists (index 1)
+            if len(node.output) > 1 and node.output[1] != '':
+                dW_output = node.output[1]
+                convgrad_w = helper.make_node(
+                    'ConvGradW',
+                    inputs=[dY, X],  # Correlation operation
+                    outputs=[dW_output],  # dW
+                    name=node.name + '_W'
+                )
+                # Copy attributes
+                for attr_name, attr in attrs.items():
+                    convgrad_w.attribute.append(copy.deepcopy(attr))
+                nodes_to_add.append(convgrad_w)
 
-            # Track if this output is a graph output
-            if outputs[1] in original_graph_outputs:
-                preserved_outputs[outputs[1]] = True
+                # Track if this output is a graph output
+                if dW_output in original_graph_outputs:
+                    preserved_outputs[dW_output] = True
 
-            # Create ConvGradB node if bias gradient exists
-            # Only needs: output gradient (dY)
-            if len(outputs) >= 3:
+            # Create ConvGradB node if dB output exists (index 2)
+            if len(node.output) > 2 and node.output[2] != '':
+                dB_output = node.output[2]
                 convgrad_b = helper.make_node(
                     'ConvGradB',
                     inputs=[dY],  # Sum over spatial dimensions
-                    outputs=[outputs[2]],  # dB
+                    outputs=[dB_output],  # dB
                     name=node.name + '_B'
                 )
                 # Copy attributes (though ConvGradB may not need all of them)
@@ -340,8 +345,8 @@ def split_convgrad_nodes(input_onnx, output_onnx):
                 nodes_to_add.append(convgrad_b)
 
                 # Track if this output is a graph output
-                if outputs[2] in original_graph_outputs:
-                    preserved_outputs[outputs[2]] = True
+                if dB_output in original_graph_outputs:
+                    preserved_outputs[dB_output] = True
 
             # Mark original node for removal
             nodes_to_remove.append(node)

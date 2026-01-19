@@ -17,9 +17,9 @@ def generate_convgradx_onnx_and_data(save_path=None):
         config = yaml.safe_load(f)
 
     model_config = config.get("convgradx", {})
-    output_grad_shape = tuple(model_config.get("input_grad_shape", [1, 8, 8, 8]))
+    output_grad_shape = tuple(model_config.get("output_grad_shape", [1, 8, 8, 8]))
     weight_shape = tuple(model_config.get("weight_shape", [8, 16, 3, 3]))
-    input_shape = tuple(model_config.get("input_data_shape", [1, 16, 8, 8]))
+    input_shape = tuple(model_config.get("input_grad_shape", [1, 16, 8, 8]))
     kernel_shape = model_config.get("kernel_shape", [3, 3])
     strides = model_config.get("strides", [1, 1])
     pads = model_config.get("pads", [1, 1, 1, 1])
