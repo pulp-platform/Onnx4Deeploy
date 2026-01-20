@@ -380,8 +380,15 @@ def split_convgrad_nodes(input_onnx, output_onnx):
         print(f"   {len(preserved_outputs)} ConvGrad outputs are graph outputs")
 
 
-def run_train_onnx_optimization(onnx_train_file, onnx_output_file):
+def run_train_onnx_optimization(onnx_train_file, onnx_output_file, split_layernormgrad=False):
+    """
+    Run optimization passes on the training ONNX model.
 
+    Args:
+        onnx_train_file: Path to the input training ONNX model
+        onnx_output_file: Path to save the optimized model
+        split_layernormgrad: If True, split LayerNormGrad into X/W/B nodes (for training norm params)
+    """
     print(f"🔹 Running optimization for {onnx_train_file}...")
 
     fix_layernorm_output(onnx_train_file, onnx_output_file)
@@ -449,11 +456,12 @@ def run_train_onnx_optimization(onnx_train_file, onnx_output_file):
         f"✅ Successfully removed Softmax Grad Loss inputs. Saved as {onnx_output_file}"
     )
     process_layernormgrad_nodes(
-        onnx_output_file, onnx_output_file
+        onnx_output_file, onnx_output_file, split_nodes=split_layernormgrad
     )  # Process LayerNormGrad nodes
-    print(
-        f"✅ Successfully processed LayerNormGrad nodes. Saved as {onnx_output_file}"
-    )
+    if split_layernormgrad:
+        print(f"✅ Successfully split LayerNormGrad into X/W/B nodes. Saved as {onnx_output_file}")
+    else:
+        print(f"✅ Successfully processed LayerNormGrad nodes. Saved as {onnx_output_file}")
     
     run_optmization_remove_biasgelu(onnx_output_file, onnx_output_file)
     print(f"✅ Successfully removed BiasGeluFusion. Saved as {onnx_output_file}")

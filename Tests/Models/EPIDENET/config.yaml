@@ -1,6 +1,6 @@
 epidenet:
   pretrained: False        # Path to pretrained model or False
-  C: 16                    # Number of EOG channels (16 for vertical + horizontal EOG)
+  C: 2                    # Number of EOG channels (16 for vertical + horizontal EOG)
   T: 1000                  # Number of time samples (1000 = 2 seconds at 500Hz)
   N: 11                    # Number of classes (11 EOG movement types)
   p_dropout: 0.0           # Dropout probability (0.0 = no dropout)

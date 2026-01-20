@@ -227,16 +227,16 @@ def generate_epidenet_training_onnx(save_path=None):
             "fcn_bias",
 
             # Or train all layers:
-            # "conv1_weight",
+            "conv1_weight",
             # # "conv1_bias",
-            # "conv2_weight",
+            "conv2_weight",
             # # "conv2_bias",
-            # "conv3_weight",
+            "conv3_weight",
             # # "conv3_bias",
-            # "conv4_weight",
+            "conv4_weight",
             # # "conv4_bias",
-            # "conv5_weight",
-            # # "conv5_bias",
+            "conv5_weight",
+            # "conv5_bias",WW
         ]
     ]
 

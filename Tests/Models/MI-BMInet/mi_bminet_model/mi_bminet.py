@@ -389,7 +389,7 @@ class MIBMINetDeploy(nn.Module):
     Deployment-optimized MI-BMINet for on-chip inference
 
     Features:
-    - BatchNorm fused into Conv layers (all Conv have bias=True)
+    - LayerNorm for normalization (ONNX training compatible)
     - No Dropout layers (not needed in inference)
     - No padding layers (minimal operations)
     - Clean ONNX export for edge deployment
@@ -424,25 +424,29 @@ class MIBMINetDeploy(nn.Module):
         self.Nf2 = Nf2
 
         # Calculate feature size after all pooling
-        # After conv2: T - Nf + 1
-        # After pool1: (T - Nf + 1) // 8
-        # After sep_conv1: ((T - Nf + 1) // 8) - Nf2 + 1
-        # After pool2: (((T - Nf + 1) // 8) - Nf2 + 1) // 8
+        # After conv1: (batch, F1, 1, T)
+        # After conv2: (batch, D*F1, 1, T - Nf + 1)
+        # After pool1: (batch, D*F1, 1, (T - Nf + 1) // 8)
+        # After sep_conv1: (batch, D*F1, 1, ((T - Nf + 1) // 8) - Nf2 + 1)
+        # After sep_conv2: (batch, F2, 1, ((T - Nf + 1) // 8) - Nf2 + 1)
+        # After pool2: (batch, F2, 1, (((T - Nf + 1) // 8) - Nf2 + 1) // 8)
         T_after_conv2 = T - Nf + 1
         T_after_pool1 = T_after_conv2 // 8
         T_after_sepconv1 = T_after_pool1 - Nf2 + 1
         n_features = T_after_sepconv1 // 8
 
         # Block 1: Spectral + Spatial filtering
-        # All Conv layers have bias=True (BatchNorm is fused)
-        self.conv1 = nn.Conv2d(1, F1, kernel_size=(C, 1), bias=True)
-        self.conv2 = nn.Conv2d(F1, D * F1, kernel_size=(1, Nf), groups=F1, bias=True)
+        self.conv1 = nn.Conv2d(1, F1, kernel_size=(C, 1), bias=False)
+        self.layer_norm1 = nn.LayerNorm([F1, 1, T], eps=0.001)
+        self.conv2 = nn.Conv2d(F1, D * F1, kernel_size=(1, Nf), groups=F1, bias=False)
+        self.layer_norm2 = nn.LayerNorm([D * F1, 1, T_after_conv2], eps=0.001)
         self.activation1 = nn.ELU(inplace=True) if activation == 'elu' else nn.ReLU(inplace=True)
         self.pool1 = nn.AvgPool2d(kernel_size=(1, 8))
 
         # Block 2: Depthwise separable convolution
-        self.sep_conv1 = nn.Conv2d(D * F1, D * F1, kernel_size=(1, Nf2), groups=D * F1, bias=True)
-        self.sep_conv2 = nn.Conv2d(D * F1, F2, kernel_size=(1, 1), bias=True)
+        self.sep_conv1 = nn.Conv2d(D * F1, D * F1, kernel_size=(1, Nf2), groups=D * F1, bias=False)
+        self.sep_conv2 = nn.Conv2d(D * F1, F2, kernel_size=(1, 1), bias=False)
+        self.layer_norm3 = nn.LayerNorm([F2, 1, T_after_sepconv1], eps=0.001)
         self.activation2 = nn.ELU(inplace=True) if activation == 'elu' else nn.ReLU(inplace=True)
         self.pool2 = nn.AvgPool2d(kernel_size=(1, 8))
 
@@ -462,13 +466,16 @@ class MIBMINetDeploy(nn.Module):
         """
         # Block 1
         x = self.conv1(x)           # (batch, F1, 1, T)
+        x = self.layer_norm1(x)
         x = self.conv2(x)           # (batch, D*F1, 1, T-Nf+1)
+        x = self.layer_norm2(x)
         x = self.activation1(x)
         x = self.pool1(x)           # (batch, D*F1, 1, (T-Nf+1)//8)
 
         # Block 2
         x = self.sep_conv1(x)       # (batch, D*F1, 1, (T-Nf+1)//8-Nf2+1)
         x = self.sep_conv2(x)       # (batch, F2, 1, (T-Nf+1)//8-Nf2+1)
+        x = self.layer_norm3(x)
         x = self.activation2(x)
         x = self.pool2(x)           # (batch, F2, 1, ((T-Nf+1)//8-Nf2+1)//8)
 

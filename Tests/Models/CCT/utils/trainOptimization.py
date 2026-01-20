@@ -2465,84 +2465,162 @@ def optimize_softmax_axis(input_model_path, output_model_path):
     print(f"Optimization complete. Modified {len(nodes_to_remove)} Softmax nodes.")
     return optimized
 
-def process_layernormgrad_nodes(model_path, output_path):
+def process_layernormgrad_nodes(model_path, output_path, split_nodes=False):
     """
-    Process LayerNormalizationGrad nodes to:
-    1. Keep only the data gradient as output
-    2. Modify inputs to keep only: upstream gradient, input, weight, and bias
-    
+    Process LayerNormalizationGrad nodes.
+
     Args:
         model_path: Path to the input ONNX model
         output_path: Path where the modified model will be saved
+        split_nodes: If True, split into LayerNormGradX/W/B nodes.
+                     If False, keep only dX output (original behavior).
     """
-    # Load the model
     model = onnx.load(model_path)
-    
-    # Process each node
-    for i, node in enumerate(model.graph.node):
+    graph = model.graph
+
+    if not split_nodes:
+        # Original behavior: keep only dX output
+        for node in graph.node:
+            if node.op_type == "LayerNormalizationGrad":
+                inputs = list(node.input)
+                outputs = list(node.output)
+
+                if len(outputs) >= 1:
+                    data_grad = outputs[0]
+                    del node.output[:]
+                    node.output.append(data_grad)
+
+                # Find bias name
+                bias_name = None
+                if len(inputs) >= 3:
+                    weight_name = inputs[2]
+                    possible_bias_name = weight_name.replace("weight", "bias")
+                    for initializer in graph.initializer:
+                        if initializer.name == possible_bias_name:
+                            bias_name = possible_bias_name
+                            break
+
+                if bias_name is None:
+                    for n in graph.node:
+                        if n.op_type == "LayerNormalization":
+                            if len(n.input) >= 3:
+                                bias_name = n.input[2]
+                                break
+
+                if bias_name is not None:
+                    new_inputs = []
+                    if len(inputs) >= 2:
+                        new_inputs.extend([inputs[0], inputs[1]])
+                    if len(inputs) >= 3:
+                        new_inputs.append(inputs[2])
+                    new_inputs.append(bias_name)
+                    del node.input[:]
+                    node.input.extend(new_inputs)
+                else:
+                    print(f"Warning: Bias input could not be found for node {node.name}")
+
+        onnx.save(model, output_path)
+        print(f"Modified model saved to {output_path}")
+        return
+
+    # Split mode: split LayerNormalizationGrad into X, W, B gradient nodes
+    original_graph_outputs = set(out.name for out in graph.output)
+
+    # Build a set of all tensor names that are used as inputs by other nodes
+    used_tensors = set()
+    for node in graph.node:
+        for inp in node.input:
+            used_tensors.add(inp)
+    # Also add graph outputs as used
+    used_tensors.update(original_graph_outputs)
+
+    nodes_to_add = []
+    nodes_to_remove = []
+
+    for node in graph.node:
         if node.op_type == "LayerNormalizationGrad":
-            # Get the original inputs and outputs
             inputs = list(node.input)
             outputs = list(node.output)
-            
-            if len(outputs) >= 1:
-                # Keep only the first output (data gradient)
-                data_grad = outputs[0]
-                del node.output[:]
-                node.output.append(data_grad)
-            
-            # Now modify the inputs
-            # We need to find the bias input or create a connection for it
-            # Assuming the bias is available somewhere in the graph
-            
-            # Find where the bias might be
-            bias_name = None
-            
-            # Option 1: Try to find if bias exists as an initializer
-            # Naming convention might be similar to weight name but with "bias" instead of "weight"
-            if len(inputs) >= 3:
-                weight_name = inputs[2]  # Assuming weight is the third input
-                possible_bias_name = weight_name.replace("weight", "bias")
-                
-                # Check if this name exists in initializers
-                for initializer in model.graph.initializer:
-                    if initializer.name == possible_bias_name:
-                        bias_name = possible_bias_name
-                        break
-            
-            # Option 2: If bias name not found, look in other nodes' inputs
-            if bias_name is None:
-                for n in model.graph.node:
-                    if n.op_type == "LayerNormalization":
-                        # LayerNorm forward node typically has bias as input
-                        if len(n.input) >= 3:
-                            # Usually the third input to LayerNorm is bias
-                            bias_name = n.input[2]
-                            break
-            
-            # If bias was found, create new input list with only what we need
-            if bias_name is not None:
-                new_inputs = []
-                
-                # Keep upstream gradient and input
-                if len(inputs) >= 2:
-                    new_inputs.extend([inputs[0], inputs[1]])
-                
-                # Keep weight
-                if len(inputs) >= 3:
-                    new_inputs.append(inputs[2])
-                
-                # Add bias
-                new_inputs.append(bias_name)
-                
-                # Replace inputs
-                del node.input[:]
-                node.input.extend(new_inputs)
-            else:
-                print(f"Warning: Bias input could not be found for node {node.name}")
-    
-    # Save the modified model
+
+            # LayerNormGrad inputs:
+            # [0] dY: upstream gradient
+            # [1] X: forward input
+            # [2] gamma: scale/weight
+            # [3] mean: computed mean
+            # [4] inv_std_dev: 1/sqrt(var + eps)
+            dY = inputs[0] if len(inputs) > 0 else None
+            X = inputs[1] if len(inputs) > 1 else None
+            gamma = inputs[2] if len(inputs) > 2 else None
+            mean = inputs[3] if len(inputs) > 3 else None
+            inv_std = inputs[4] if len(inputs) > 4 else None
+
+            # Copy attributes
+            attrs = {attr.name: attr for attr in node.attribute}
+
+            # LayerNormGrad outputs:
+            # [0] dX: gradient w.r.t. input
+            # [1] dGamma: gradient w.r.t. scale/weight
+            # [2] dBeta: gradient w.r.t. bias
+
+            # Create LayerNormGradX node (dX is always needed for backprop)
+            if len(outputs) > 0 and outputs[0] != '':
+                dX_output = outputs[0]
+                grad_x_inputs = [i for i in [dY, X, gamma, mean, inv_std] if i is not None]
+
+                layernormgrad_x = helper.make_node(
+                    'LayerNormGradX',
+                    inputs=grad_x_inputs,
+                    outputs=[dX_output],
+                    name=node.name + '_X'
+                )
+                for attr_name, attr in attrs.items():
+                    layernormgrad_x.attribute.append(copy.deepcopy(attr))
+                nodes_to_add.append(layernormgrad_x)
+                print(f"✅ Created LayerNormGradX: {layernormgrad_x.name} -> {dX_output}")
+
+            # Create LayerNormGradW node only if dW output is used
+            if len(outputs) > 1 and outputs[1] != '' and outputs[1] in used_tensors:
+                dW_output = outputs[1]
+                grad_w_inputs = [i for i in [dY, X, mean, inv_std] if i is not None]
+
+                layernormgrad_w = helper.make_node(
+                    'LayerNormGradW',
+                    inputs=grad_w_inputs,
+                    outputs=[dW_output],
+                    name=node.name + '_W'
+                )
+                for attr_name, attr in attrs.items():
+                    layernormgrad_w.attribute.append(copy.deepcopy(attr))
+                nodes_to_add.append(layernormgrad_w)
+                print(f"✅ Created LayerNormGradW: {layernormgrad_w.name} -> {dW_output}")
+            elif len(outputs) > 1 and outputs[1] != '':
+                print(f"⏭️ Skipped LayerNormGradW: {outputs[1]} not used")
+
+            # Create LayerNormGradB node only if dB output is used
+            if len(outputs) > 2 and outputs[2] != '' and outputs[2] in used_tensors:
+                dB_output = outputs[2]
+                layernormgrad_b = helper.make_node(
+                    'LayerNormGradB',
+                    inputs=[dY],  # Only needs upstream gradient
+                    outputs=[dB_output],
+                    name=node.name + '_B'
+                )
+                for attr_name, attr in attrs.items():
+                    layernormgrad_b.attribute.append(copy.deepcopy(attr))
+                nodes_to_add.append(layernormgrad_b)
+                print(f"✅ Created LayerNormGradB: {layernormgrad_b.name} -> {dB_output}")
+            elif len(outputs) > 2 and outputs[2] != '':
+                print(f"⏭️ Skipped LayerNormGradB: {outputs[2]} not used")
+
+            nodes_to_remove.append(node)
+
+    # Remove original nodes and add new split nodes
+    for node in nodes_to_remove:
+        graph.node.remove(node)
+    graph.node.extend(nodes_to_add)
+
     onnx.save(model, output_path)
+    print(f"✅ Split {len(nodes_to_remove)} LayerNormGrad node(s) into {len(nodes_to_add)} separate gradient nodes")
     print(f"Modified model saved to {output_path}")
 
 def remove_identity_nodes(input_onnx, output_onnx):
@@ -2588,10 +2666,274 @@ def remove_identity_nodes(input_onnx, output_onnx):
             old_name = output.name
             output.name = tensor_replacements[old_name]
             print(f"  Updated graph output: {old_name} -> {output.name}")
-    
+
     # Save the modified model
     onnx.save(model, output_onnx)
-    
+
     print(f"✅ Removed {len(nodes_to_remove)} Identity node(s)")
-    
+
     return model
+
+
+def convert_layernorm_to_groupnorm(input_onnx, output_onnx, num_groups=1, split_grad_nodes=False):
+    """
+    Convert LayerNormalization nodes to GroupNormalization nodes.
+    Also converts LayerNormalizationGrad to GroupNormalizationGrad.
+
+    Args:
+        input_onnx: Path to the input ONNX model
+        output_onnx: Path to save the modified model
+        num_groups: Number of groups for GroupNorm (default: 1)
+        split_grad_nodes: If True, split GroupNormGrad into X/W/B nodes after conversion
+    """
+    model = onnx.load(input_onnx)
+    graph = model.graph
+
+    layernorm_count = 0
+    layernormgrad_count = 0
+
+    # Track LayerNorm weight/bias for shape adjustment
+    layernorm_params = {}
+
+    # First pass: collect LayerNorm info and convert forward nodes
+    for node in graph.node:
+        if node.op_type == "LayerNormalization":
+            layernorm_count += 1
+            old_name = node.name
+
+            # Get weight and bias names
+            weight_name = node.input[1] if len(node.input) > 1 else None
+            bias_name = node.input[2] if len(node.input) > 2 else None
+
+            # Find num_channels from weight initializer
+            num_channels = None
+            if weight_name:
+                for init in graph.initializer:
+                    if init.name == weight_name:
+                        weight_array = numpy_helper.to_array(init)
+                        num_channels = weight_array.shape[0]
+                        layernorm_params[weight_name] = {
+                            'num_channels': num_channels,
+                            'original_shape': weight_array.shape
+                        }
+                        break
+
+            if bias_name:
+                for init in graph.initializer:
+                    if init.name == bias_name:
+                        bias_array = numpy_helper.to_array(init)
+                        layernorm_params[bias_name] = {
+                            'num_channels': bias_array.shape[0],
+                            'original_shape': bias_array.shape
+                        }
+                        break
+
+            # Change op_type
+            node.op_type = "GroupNormalization"
+            node.name = old_name.replace("LayerNorm", "GroupNorm") if "LayerNorm" in old_name else old_name
+
+            # Get epsilon
+            epsilon = 1e-5
+            for attr in node.attribute:
+                if attr.name == "epsilon":
+                    epsilon = attr.f
+
+            # Reset attributes for GroupNorm
+            del node.attribute[:]
+            node.attribute.append(helper.make_attribute("epsilon", epsilon))
+            node.attribute.append(helper.make_attribute("num_groups", num_groups))
+
+            print(f"✅ Converted {old_name} -> {node.name} (C={num_channels}, G={num_groups})")
+
+    # Second pass: convert gradient nodes (both original and split versions)
+    grad_op_mapping = {
+        "LayerNormalizationGrad": "GroupNormalizationGrad",
+        "LayerNormGradX": "GroupNormGradX",
+        "LayerNormGradW": "GroupNormGradW",
+        "LayerNormGradB": "GroupNormGradB",
+    }
+
+    for node in graph.node:
+        if node.op_type in grad_op_mapping:
+            layernormgrad_count += 1
+            old_name = node.name
+            old_op = node.op_type
+
+            node.op_type = grad_op_mapping[old_op]
+            node.name = old_name.replace("LayerNorm", "GroupNorm")
+
+            epsilon = 1e-5
+            for attr in node.attribute:
+                if attr.name == "epsilon":
+                    epsilon = attr.f
+
+            del node.attribute[:]
+            node.attribute.append(helper.make_attribute("epsilon", epsilon))
+            node.attribute.append(helper.make_attribute("num_groups", num_groups))
+
+            print(f"✅ Converted {old_op}:{old_name} -> {node.op_type}:{node.name}")
+
+    # Third pass: adjust weight/bias shapes from [C, H, W] to [C]
+    for init in graph.initializer:
+        if init.name in layernorm_params:
+            param_info = layernorm_params[init.name]
+            original_shape = param_info['original_shape']
+            num_channels = param_info['num_channels']
+
+            if len(original_shape) > 1:
+                original_array = numpy_helper.to_array(init)
+                # Reshape to [C] by averaging across spatial dims
+                new_array = original_array.reshape(num_channels, -1).mean(axis=1).astype(original_array.dtype)
+                new_init = numpy_helper.from_array(new_array, init.name)
+                init.CopyFrom(new_init)
+                print(f"✅ Reshaped {init.name}: {original_shape} -> {new_array.shape}")
+
+    onnx.save(model, output_onnx)
+
+    print(f"\n📊 Conversion Summary:")
+    print(f"   - LayerNorm -> GroupNorm: {layernorm_count}")
+    print(f"   - LayerNormGrad -> GroupNormGrad: {layernormgrad_count}")
+    print(f"✅ Saved to {output_onnx}")
+
+    # If split_grad_nodes is True, split GroupNormGrad into X/W/B nodes
+    if split_grad_nodes:
+        print(f"\n🔄 Splitting GroupNormGrad nodes into X/W/B...")
+        split_groupnormgrad_nodes(output_onnx, output_onnx)
+
+
+def split_groupnormgrad_nodes(input_onnx, output_onnx):
+    """
+    Split GroupNormalizationGrad nodes with 3 outputs into 3 separate nodes:
+    GroupNormGradX, GroupNormGradW, and GroupNormGradB.
+
+    Similar to ConvGrad splitting, each node only receives inputs it needs:
+    - GroupNormGradX: [dY, X, gamma, mean, inv_std] - computes input gradient
+    - GroupNormGradW: [dY, X, mean, inv_std] - computes weight/scale gradient
+    - GroupNormGradB: [dY] - computes bias gradient (sum over normalized dims)
+
+    Only creates nodes if their outputs are actually used (as graph outputs or by other nodes).
+
+    Args:
+        input_onnx: Path to the input ONNX model
+        output_onnx: Path to save the modified model
+    """
+    model = onnx.load(input_onnx)
+    graph = model.graph
+
+    # Store original graph outputs to preserve them
+    original_graph_outputs = set(out.name for out in graph.output)
+
+    # Build a set of all tensor names that are used as inputs by other nodes
+    used_tensors = set()
+    for node in graph.node:
+        for inp in node.input:
+            used_tensors.add(inp)
+    # Also add graph outputs as used
+    used_tensors.update(original_graph_outputs)
+
+    nodes_to_add = []
+    nodes_to_remove = []
+
+    for node in graph.node:
+        if node.op_type == "GroupNormalizationGrad":
+            # GroupNormGrad inputs (from ONNX Runtime training):
+            # [0] dY: upstream gradient
+            # [1] X: forward input
+            # [2] gamma: scale/weight
+            # [3] mean: computed mean
+            # [4] inv_std_dev: 1/sqrt(var + eps)
+            inputs = list(node.input)
+            outputs = list(node.output)
+
+            if len(inputs) < 3:
+                print(f"⚠️ Skipping {node.name}: insufficient inputs ({len(inputs)})")
+                continue
+
+            dY = inputs[0]
+            X = inputs[1]
+            gamma = inputs[2] if len(inputs) > 2 else None
+            mean = inputs[3] if len(inputs) > 3 else None
+            inv_std = inputs[4] if len(inputs) > 4 else None
+
+            # Copy attributes from original node
+            attrs = {attr.name: attr for attr in node.attribute}
+
+            # GroupNormGrad outputs:
+            # [0] dX: gradient w.r.t. input
+            # [1] dGamma: gradient w.r.t. scale/weight
+            # [2] dBeta: gradient w.r.t. bias
+
+            # Create GroupNormGradX node (dX is always needed for backprop)
+            if len(outputs) > 0 and outputs[0] != '':
+                dX_output = outputs[0]
+                grad_x_inputs = [dY, X]
+                if gamma:
+                    grad_x_inputs.append(gamma)
+                if mean:
+                    grad_x_inputs.append(mean)
+                if inv_std:
+                    grad_x_inputs.append(inv_std)
+
+                groupnormgrad_x = helper.make_node(
+                    'GroupNormGradX',
+                    inputs=grad_x_inputs,
+                    outputs=[dX_output],
+                    name=node.name + '_X'
+                )
+                for attr_name, attr in attrs.items():
+                    groupnormgrad_x.attribute.append(copy.deepcopy(attr))
+                nodes_to_add.append(groupnormgrad_x)
+                print(f"✅ Created {groupnormgrad_x.name} -> {dX_output}")
+
+            # Create GroupNormGradW node only if dW output is used
+            if len(outputs) > 1 and outputs[1] != '' and outputs[1] in used_tensors:
+                dW_output = outputs[1]
+                grad_w_inputs = [dY, X]
+                if mean:
+                    grad_w_inputs.append(mean)
+                if inv_std:
+                    grad_w_inputs.append(inv_std)
+
+                groupnormgrad_w = helper.make_node(
+                    'GroupNormGradW',
+                    inputs=grad_w_inputs,
+                    outputs=[dW_output],
+                    name=node.name + '_W'
+                )
+                for attr_name, attr in attrs.items():
+                    groupnormgrad_w.attribute.append(copy.deepcopy(attr))
+                nodes_to_add.append(groupnormgrad_w)
+                print(f"✅ Created {groupnormgrad_w.name} -> {dW_output}")
+            elif len(outputs) > 1 and outputs[1] != '':
+                print(f"⏭️ Skipped GroupNormGradW: {outputs[1]} not used")
+
+            # Create GroupNormGradB node only if dB output is used
+            if len(outputs) > 2 and outputs[2] != '' and outputs[2] in used_tensors:
+                dB_output = outputs[2]
+                groupnormgrad_b = helper.make_node(
+                    'GroupNormGradB',
+                    inputs=[dY],  # Only needs upstream gradient
+                    outputs=[dB_output],
+                    name=node.name + '_B'
+                )
+                for attr_name, attr in attrs.items():
+                    groupnormgrad_b.attribute.append(copy.deepcopy(attr))
+                nodes_to_add.append(groupnormgrad_b)
+                print(f"✅ Created {groupnormgrad_b.name} -> {dB_output}")
+            elif len(outputs) > 2 and outputs[2] != '':
+                print(f"⏭️ Skipped GroupNormGradB: {outputs[2]} not used")
+
+            # Mark original node for removal
+            nodes_to_remove.append(node)
+
+    # Remove original GroupNormGrad nodes
+    for node in nodes_to_remove:
+        graph.node.remove(node)
+
+    # Add new split nodes
+    graph.node.extend(nodes_to_add)
+
+    # Save the modified model
+    onnx.save(model, output_onnx)
+
+    print(f"✅ Split {len(nodes_to_remove)} GroupNormGrad node(s) into {len(nodes_to_add)} separate gradient nodes")

@@ -1,0 +1,8 @@
+groupnormgradx:
+  # Input/output shapes for GroupNormGradX
+  # GroupNorm normalizes over (C/num_groups, H, W) for each group
+  # Input shape: [N, C, H, W] or [N, C, 1, T] for 1D signals
+  input_shape: [1, 8, 1, 64]      # [N, C, H, W]
+  num_groups: 1                    # Number of groups (1 = LayerNorm behavior)
+  epsilon: 0.001                   # Small constant for numerical stability
+  opset_version: 13

@@ -12,6 +12,7 @@ from utils.fixShape import *
 from utils.utils import *
 from utils.checkNetworkstructure import *
 from utils.appendOptimizer import *
+from utils.trainOptimization import convert_layernorm_to_groupnorm
 
 
 def load_config(config_filename="config.yaml"):
@@ -234,13 +235,16 @@ def generate_mi_bminet_training_onnx(save_path=None):
             # Example: Train only the final classifier
             "fc_weight",
             "fc_bias",
-            # "conv1_weight",
+            # "layer_norm3_weight",  # Fixed: removed leading space
+            # "layer_norm3_bias",
+            "conv1_weight",
+            "layer_norm1_weight",
             # "conv1_bias",
-            # "conv2_weight",
+            "conv2_weight",
             # "conv2_bias",
-            # "sep_conv1_weight",
+            "sep_conv1_weight",
             # "sep_conv1_bias",
-            # "sep_conv2_weight",
+            "sep_conv2_weight",
             # "sep_conv2_bias",
         ]
     ]
@@ -265,24 +269,53 @@ def generate_mi_bminet_training_onnx(save_path=None):
         os.rename(training_model_path, onnx_train_file)
         print(f" Final Training ONNX model saved as {onnx_train_file}")
 
-    # Load the training model and add gradient outputs
+    # Load the training model and check gradient outputs
     onnx_model = onnx.load(onnx_train_file)
     graph = onnx_model.graph
+
+    # Debug: Print all outputs from training model
+    print(f"\n📋 Training model outputs ({len(graph.output)}):")
+    for out in graph.output:
+        print(f"   - {out.name}")
+
+    # Debug: Find LayerNormalizationGrad nodes and their outputs
+    print(f"\n📋 LayerNormalizationGrad nodes:")
+    for node in graph.node:
+        if "LayerNorm" in node.op_type and "Grad" in node.op_type:
+            print(f"   - {node.name} ({node.op_type})")
+            print(f"     Inputs: {list(node.input)}")
+            print(f"     Outputs: {list(node.output)}")
+
+    # Add gradient outputs that are expected but missing
     grad_tensor_names = [name + "_grad" for name in requires_grad]
 
     for grad_name in grad_tensor_names:
         if not any(output.name == grad_name for output in graph.output):
-            grad_output = helper.make_tensor_value_info(
-                grad_name, onnx.TensorProto.FLOAT, None
-            )
-            graph.output.append(grad_output)
+            # Check if this gradient is actually produced by any node
+            is_produced = False
+            for node in graph.node:
+                if grad_name in node.output:
+                    is_produced = True
+                    break
+
+            if is_produced:
+                grad_output = helper.make_tensor_value_info(
+                    grad_name, onnx.TensorProto.FLOAT, None
+                )
+                graph.output.append(grad_output)
+                print(f"✅ Added gradient output: {grad_name}")
+            else:
+                print(f"⚠️ Gradient {grad_name} not produced by any node!")
 
     onnx.save(onnx_model, onnx_train_optim)
     onnx.save(onnx_model, onnx_train_file)
 
+    # Check if any norm parameters need training (to determine if we split LayerNormGrad)
+    train_norm_params = any("layer_norm" in name or "norm" in name.lower() for name in requires_grad)
+
     # Optimize training model
     onnx_output_file = os.path.join(base_path, "network.onnx")
-    run_train_onnx_optimization(onnx_train_optim, onnx_output_file)
+    run_train_onnx_optimization(onnx_train_optim, onnx_output_file, split_layernormgrad=train_norm_params)
     infer_shapes_with_custom_ops(onnx_output_file, onnx_output_file)
     rename_nodes(onnx_output_file, onnx_output_file)
     print_onnx_shapes(onnx_output_file)
@@ -307,9 +340,13 @@ def generate_mi_bminet_training_onnx(save_path=None):
     print(f" Added SGD nodes to {onnx_output_file}")
     ensure_all_tensor_shapes(onnx_output_file, onnx_output_file)
 
-    print(f"\n<� MI-BMINet training model generation complete!")
-    print(f"=� Output directory: {base_path}")
-    print(f"=� Files generated:")
+    # Convert LayerNorm to GroupNorm for deployment
+    convert_layernorm_to_groupnorm(onnx_output_file, onnx_output_file, num_groups=1)
+    print(f"✅ Converted LayerNorm to GroupNorm in {onnx_output_file}")
+
+    print(f"\n🎉 MI-BMINet training model generation complete!")
+    print(f"📁 Output directory: {base_path}")
+    print(f"📄 Files generated:")
     print(f"   - network_infer.onnx: Inference model")
     print(f"   - network_train.onnx: Training model (before optimization)")
     print(f"   - network_pre_sgd.onnx: Training model (before SGD)")
