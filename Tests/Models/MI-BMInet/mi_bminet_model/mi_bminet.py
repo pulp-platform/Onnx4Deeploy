@@ -606,3 +606,120 @@ def mi_bminet_deploy(
         model.load_and_fuse_from_training_model(pretrained_model)
 
     return model
+
+
+class MIBMINetDeployGroupNorm(nn.Module):
+    """
+    MI-BMINet with GroupNorm (num_groups=1) for gradient-compatible training reference.
+
+    This version uses GroupNorm instead of LayerNorm so that:
+    - weight shape is [C] instead of [C, H, W]
+    - gradient dGamma shape is [C], matching Deeploy's GroupNormGradW output
+
+    Use this model to generate reference gradients for Deeploy testing.
+    """
+
+    def __init__(
+        self,
+        F1=8,
+        D=2,
+        F2=None,
+        C=8,
+        T=2000,
+        N=4,
+        Nf=64,
+        Nf2=16,
+        activation='relu',
+        **kwargs,
+    ):
+        super(MIBMINetDeployGroupNorm, self).__init__()
+
+        if F2 is None:
+            F2 = F1 * D
+
+        activation = activation.lower()
+        assert activation in ['elu', 'relu'], f"activation must be 'elu' or 'relu', got {activation}"
+
+        self.F1, self.D, self.F2, self.C, self.T, self.N = (F1, D, F2, C, T, N)
+        self.Nf = Nf
+        self.Nf2 = Nf2
+
+        T_after_conv2 = T - Nf + 1
+        T_after_pool1 = T_after_conv2 // 8
+        T_after_sepconv1 = T_after_pool1 - Nf2 + 1
+        n_features = T_after_sepconv1 // 8
+
+        # Block 1: Spectral + Spatial filtering
+        self.conv1 = nn.Conv2d(1, F1, kernel_size=(C, 1), bias=False)
+        # GroupNorm with num_groups=1: weight shape is [F1], not [F1, 1, T]
+        self.layer_norm1 = nn.GroupNorm(num_groups=1, num_channels=F1, eps=0.001)
+        self.conv2 = nn.Conv2d(F1, D * F1, kernel_size=(1, Nf), groups=F1, bias=False)
+        self.layer_norm2 = nn.GroupNorm(num_groups=1, num_channels=D * F1, eps=0.001)
+        self.activation1 = nn.ELU(inplace=True) if activation == 'elu' else nn.ReLU(inplace=True)
+        self.pool1 = nn.AvgPool2d(kernel_size=(1, 8))
+
+        # Block 2: Depthwise separable convolution
+        self.sep_conv1 = nn.Conv2d(D * F1, D * F1, kernel_size=(1, Nf2), groups=D * F1, bias=False)
+        self.sep_conv2 = nn.Conv2d(D * F1, F2, kernel_size=(1, 1), bias=False)
+        self.layer_norm3 = nn.GroupNorm(num_groups=1, num_channels=F2, eps=0.001)
+        self.activation2 = nn.ELU(inplace=True) if activation == 'elu' else nn.ReLU(inplace=True)
+        self.pool2 = nn.AvgPool2d(kernel_size=(1, 8))
+
+        # Classifier
+        self.fc = nn.Linear(F2 * n_features, N, bias=True)
+        self.fc_input_size = F2 * n_features
+
+    def forward(self, x):
+        # Block 1
+        x = self.conv1(x)
+        x = self.layer_norm1(x)
+        x = self.conv2(x)
+        x = self.layer_norm2(x)
+        x = self.activation1(x)
+        x = self.pool1(x)
+
+        # Block 2
+        x = self.sep_conv1(x)
+        x = self.sep_conv2(x)
+        x = self.layer_norm3(x)
+        x = self.activation2(x)
+        x = self.pool2(x)
+
+        # Classifier
+        batch_size = x.shape[0]
+        x = x.reshape(batch_size, self.fc_input_size)
+        x = self.fc(x)
+
+        return x
+
+    def load_weights_from_layernorm_model(self, layernorm_model):
+        """
+        Load weights from MIBMINetDeploy (LayerNorm version).
+        LayerNorm weights [C, H, W] are converted to GroupNorm weights [C] via mean.
+        """
+        # Copy conv weights
+        self.conv1.weight.data = layernorm_model.conv1.weight.data.clone()
+        self.conv2.weight.data = layernorm_model.conv2.weight.data.clone()
+        self.sep_conv1.weight.data = layernorm_model.sep_conv1.weight.data.clone()
+        self.sep_conv2.weight.data = layernorm_model.sep_conv2.weight.data.clone()
+        self.fc.weight.data = layernorm_model.fc.weight.data.clone()
+        self.fc.bias.data = layernorm_model.fc.bias.data.clone()
+
+        # Convert LayerNorm weights [C, H, W] -> GroupNorm weights [C]
+        # Use mean over H, W dimensions (same as convert_layernorm_to_groupnorm)
+        ln1_w = layernorm_model.layer_norm1.weight.data  # [F1, 1, T]
+        ln1_b = layernorm_model.layer_norm1.bias.data
+        self.layer_norm1.weight.data = ln1_w.reshape(ln1_w.shape[0], -1).mean(dim=1)
+        self.layer_norm1.bias.data = ln1_b.reshape(ln1_b.shape[0], -1).mean(dim=1)
+
+        ln2_w = layernorm_model.layer_norm2.weight.data  # [D*F1, 1, T_after_conv2]
+        ln2_b = layernorm_model.layer_norm2.bias.data
+        self.layer_norm2.weight.data = ln2_w.reshape(ln2_w.shape[0], -1).mean(dim=1)
+        self.layer_norm2.bias.data = ln2_b.reshape(ln2_b.shape[0], -1).mean(dim=1)
+
+        ln3_w = layernorm_model.layer_norm3.weight.data  # [F2, 1, T_after_sepconv1]
+        ln3_b = layernorm_model.layer_norm3.bias.data
+        self.layer_norm3.weight.data = ln3_w.reshape(ln3_w.shape[0], -1).mean(dim=1)
+        self.layer_norm3.bias.data = ln3_b.reshape(ln3_b.shape[0], -1).mean(dim=1)
+
+        print("✅ Loaded weights from LayerNorm model to GroupNorm model")

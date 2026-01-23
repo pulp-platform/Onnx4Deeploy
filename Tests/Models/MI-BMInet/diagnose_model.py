@@ -1,122 +1,83 @@
-#!/usr/bin/env python3
-"""
-Diagnostic script to compare network_train.onnx and network.onnx
-and identify any missing nodes or outputs.
-"""
-
+import torch
+import torch.nn as nn
+import numpy as np
 import os
 import sys
-
-# Add utils to path
-script_dir = os.path.dirname(os.path.abspath(__file__))
-sys.path.insert(0, script_dir)
-
-from utils.utils import compare_onnx_models
+import yaml
 
 
-def main():
-    # Check for existing ONNX files
-    base_dir = script_dir
+from mi_bminet_model.mi_bminet import MIBMINetDeploy
 
-    # Find the latest generated model directory
-    onnx_dir = os.path.join(base_dir, "onnx")
+from testtraingenerate import load_config, load_train_config
 
-    if not os.path.exists(onnx_dir):
-        print(f"❌ No onnx directory found at {onnx_dir}")
-        print("Please run testtraingenerate.py first to generate the models.")
+def debug_specific_layer(target_layer_name, save_path="debug_output"):
+
+    (pretrained, F1, D, F2, C, T, N, Nf, Nf2, activation, batch_size, opset_version) = load_config()
+    lr = load_train_config()
+
+    model = MIBMINetDeploy(
+        F1=F1, D=D, F2=F2, C=C, T=T, N=N, Nf=Nf, Nf2=Nf2, activation=activation
+    )
+    model.train()
+
+
+    storage = {
+        "input": None,
+        "output": None,
+        "grad_input": None,
+        "grad_output": None
+    }
+
+    def forward_hook(module, input, output):
+   
+        storage["input"] = input[0].detach().cpu().numpy()
+        storage["output"] = output.detach().cpu().numpy()
+
+    def backward_hook(module, grad_input, grad_output):
+      
+        storage["grad_output"] = grad_output[0].detach().cpu().numpy()
+        if grad_input[0] is not None:
+            storage["grad_input"] = grad_input[0].detach().cpu().numpy()
+
+    try:
+        layer = dict(model.named_modules())[target_layer_name]
+        layer.register_forward_hook(forward_hook)
+        layer.register_full_backward_hook(backward_hook)
+        print(f"🎯 Successfully registered hooks on: {target_layer_name}")
+    except KeyError:
+        print(f"❌ Layer '{target_layer_name}' not found in model!")
+        print("Available layers:", [name for name, _ in model.named_modules() if name])
         return
 
-    # List all subdirectories
-    subdirs = [d for d in os.listdir(onnx_dir) if os.path.isdir(os.path.join(onnx_dir, d))]
+    torch.manual_seed(42)
+    input_tensor = torch.randn(batch_size, 1, C, T)
+    labels = torch.randint(0, N, (batch_size,))
+    criterion = nn.CrossEntropyLoss()
 
-    if not subdirs:
-        print(f"❌ No model directories found in {onnx_dir}")
-        print("Please run testtraingenerate.py first to generate the models.")
-        return
 
-    # Use the first (or only) subdirectory
-    model_dir = os.path.join(onnx_dir, subdirs[0])
-    print(f"📂 Using model directory: {model_dir}")
+    pred = model(input_tensor)
+    loss = criterion(pred, labels)
+    loss.backward()
 
-    network_train = os.path.join(model_dir, "network_train.onnx")
-    network = os.path.join(model_dir, "network.onnx")
-    network_pre_sgd = os.path.join(model_dir, "network_pre_sgd.onnx")
 
-    # Check which files exist
-    files_to_check = [
-        ("network_train.onnx", network_train),
-        ("network.onnx", network),
-        ("network_pre_sgd.onnx", network_pre_sgd)
-    ]
-
-    existing_files = {}
-    for name, path in files_to_check:
-        if os.path.exists(path):
-            existing_files[name] = path
-            print(f"✅ Found {name}")
-        else:
-            print(f"❌ Missing {name}")
-
-    if len(existing_files) < 2:
-        print("\n❌ Need at least 2 model files to compare")
-        return
-
-    print("\n" + "="*70)
-    print("DIAGNOSTIC ANALYSIS")
-    print("="*70)
-
-    # Compare network_train.onnx vs network.onnx
-    if "network_train.onnx" in existing_files and "network.onnx" in existing_files:
-        print("\n🔍 Comparison 1: network_train.onnx → network.onnx")
-        result = compare_onnx_models(
-            existing_files["network_train.onnx"],
-            existing_files["network.onnx"],
-            name1="network_train.onnx",
-            name2="network.onnx"
-        )
-
-        if result['missing_outputs']:
-            print(f"\n⚠️  ISSUE DETECTED: {len(result['missing_outputs'])} outputs missing!")
-            print("This suggests the optimization pipeline is removing necessary outputs.")
-        else:
-            print("\n✅ No output loss detected in this comparison")
-
-    # Compare network_train.onnx vs network_pre_sgd.onnx
-    if "network_train.onnx" in existing_files and "network_pre_sgd.onnx" in existing_files:
-        print("\n🔍 Comparison 2: network_train.onnx → network_pre_sgd.onnx (before SGD)")
-        result = compare_onnx_models(
-            existing_files["network_train.onnx"],
-            existing_files["network_pre_sgd.onnx"],
-            name1="network_train.onnx",
-            name2="network_pre_sgd.onnx"
-        )
-
-        if result['missing_outputs']:
-            print(f"\n⚠️  ISSUE DETECTED: {len(result['missing_outputs'])} outputs missing!")
-            print("This suggests the optimization pipeline (before SGD) is removing necessary outputs.")
-        else:
-            print("\n✅ No output loss detected in this comparison")
-
-    # Compare network_pre_sgd.onnx vs network.onnx
-    if "network_pre_sgd.onnx" in existing_files and "network.onnx" in existing_files:
-        print("\n🔍 Comparison 3: network_pre_sgd.onnx → network.onnx (SGD addition)")
-        result = compare_onnx_models(
-            existing_files["network_pre_sgd.onnx"],
-            existing_files["network.onnx"],
-            name1="network_pre_sgd.onnx",
-            name2="network.onnx"
-        )
-
-        if result['missing_outputs']:
-            print(f"\n⚠️  ISSUE DETECTED: {len(result['missing_outputs'])} outputs missing!")
-            print("This suggests the SGD addition step is removing necessary outputs.")
-        else:
-            print("\n✅ No output loss detected in this comparison")
-
-    print("\n" + "="*70)
-    print("END OF DIAGNOSTIC ANALYSIS")
-    print("="*70)
-
+    os.makedirs(save_path, exist_ok=True)
+    file_name = os.path.join(save_path, f"debug_{target_layer_name}.npz")
+    np.savez(
+        file_name,
+        x=storage["input"],           
+        y=storage["output"],        
+        gy=storage["grad_output"],   
+        gx=storage["grad_input"]      
+    )
+    
+    print(f"✅ Debug data saved to: {file_name}")
+    print(f"   Shapes: x={storage['input'].shape}, y={storage['output'].shape}")
 
 if __name__ == "__main__":
-    main()
+
+    if len(sys.argv) > 1:
+        target = sys.argv[1]
+    else:
+        target = "sep_conv1" 
+    
+    debug_specific_layer(target)

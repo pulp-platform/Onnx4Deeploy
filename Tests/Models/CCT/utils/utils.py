@@ -13,6 +13,7 @@ from .fixShape import print_onnx_shapes
 from .trainOptimization import *
 import random
 from onnx import TensorProto
+import torch.nn as nn
 
 def make_c_name(name, count=0):
     if name.lower() in ["input", "output"]:
@@ -391,11 +392,11 @@ def run_train_onnx_optimization(onnx_train_file, onnx_output_file, split_layerno
     """
     print(f"🔹 Running optimization for {onnx_train_file}...")
 
-    fix_layernorm_output(onnx_train_file, onnx_output_file)
-    print(
-        f"✅ Successfully fixed LayerNormalization opset version. Saved as {onnx_output_file}"
-    )
-    optimize_softmax_axis(onnx_output_file, onnx_output_file)
+    # fix_layernorm_output(onnx_train_file, onnx_output_file)
+    # print(
+    #     f"✅ Successfully fixed LayerNormalization opset version. Saved as {onnx_output_file}"
+    # )
+    optimize_softmax_axis(onnx_train_file, onnx_output_file)
     print(
         f"✅ Successfully optimized Softmax axis. Saved as {onnx_output_file}")
 
@@ -403,10 +404,10 @@ def run_train_onnx_optimization(onnx_train_file, onnx_output_file, split_layerno
     print(
         f"✅ Successfully optimized Reshape nodes. Saved as {onnx_output_file}")
 
-    modify_conflict_outputs(onnx_output_file, onnx_output_file)
-    print(
-        f"✅ Successfully removed all second outputs from Maxpool nodes. Saved as {onnx_output_file}"
-    )
+    # modify_conflict_outputs(onnx_output_file, onnx_output_file)
+    # print(
+    #     f"✅ Successfully removed all second outputs from Maxpool nodes. Saved as {onnx_output_file}"
+    # )
 
     convert_squeeze_unsqueeze_input_to_attr(onnx_output_file, onnx_output_file)
     print(
@@ -455,9 +456,9 @@ def run_train_onnx_optimization(onnx_train_file, onnx_output_file, split_layerno
     print(
         f"✅ Successfully removed Softmax Grad Loss inputs. Saved as {onnx_output_file}"
     )
-    process_layernormgrad_nodes(
-        onnx_output_file, onnx_output_file, split_nodes=split_layernormgrad
-    )  # Process LayerNormGrad nodes
+    # process_layernormgrad_nodes(
+        # onnx_output_file, onnx_output_file, split_nodes=split_layernormgrad
+    # )  # Process LayerNormGrad nodes
     if split_layernormgrad:
         print(f"✅ Successfully split LayerNormGrad into X/W/B nodes. Saved as {onnx_output_file}")
     else:
@@ -926,3 +927,130 @@ def ensure_all_tensor_shapes(model_path, output_path):
     print(f"✅ Saved model with complete shapes to {output_path}")
     
     return onnx_model
+
+
+def create_test_input_output_pytorch(base_path, batch_size, C, T, N, model_pytorch, requires_grad_list):
+    """
+    Generate reference test inputs and outputs using GroupNorm model for gradient compatibility.
+    Uses MIBMINetDeployGroupNorm internally so that gradient shapes match Deeploy's GroupNormGradW.
+    Loads weights from ONNX file to ensure randomized biases match between ONNX and PyTorch.
+    """
+    import sys
+    import onnx
+    from onnx import numpy_helper
+
+    # base_path is like /app/.../MI-BMInet/onnx/xxx, go up two levels to reach MI-BMInet
+    mi_bminet_root = os.path.dirname(os.path.dirname(base_path))
+    mi_bminet_model_path = os.path.join(mi_bminet_root, 'mi_bminet_model')
+    if mi_bminet_model_path not in sys.path:
+        sys.path.insert(0, mi_bminet_model_path)
+    from mi_bminet import MIBMINetDeployGroupNorm
+
+    # 1. 准备数据
+    input_data = torch.randn(batch_size, 1, C, T)
+    labels = torch.randint(0, N, (batch_size,))
+
+    # 保存输入
+    input_file = os.path.join(base_path, "inputs.npz")
+    np.savez(input_file, input=input_data.numpy(), labels=labels.numpy())
+    print(f"✅ Input data saved to {input_file}")
+
+    # 2. 从 ONNX 文件加载权重（包括随机化后的 bias）
+    # 这确保 PyTorch 和 ONNX 使用相同的权重
+    onnx_infer_path = os.path.join(base_path, "network_infer.onnx")
+    print(f"📥 Loading weights from ONNX: {onnx_infer_path}")
+    onnx_model = onnx.load(onnx_infer_path)
+
+    # 将 ONNX 权重转换为字典
+    onnx_weights = {}
+    for init in onnx_model.graph.initializer:
+        onnx_weights[init.name] = numpy_helper.to_array(init)
+
+    # 3. 创建 GroupNorm 版本的模型并加载 ONNX 权重
+    model_gn = MIBMINetDeployGroupNorm(
+        F1=model_pytorch.F1,
+        D=model_pytorch.D,
+        F2=model_pytorch.F2,
+        C=model_pytorch.C,
+        T=model_pytorch.T,
+        N=model_pytorch.N,
+        Nf=model_pytorch.Nf,
+        Nf2=model_pytorch.Nf2,
+    )
+
+    # 加载 ONNX 权重到 GroupNorm 模型
+    # Conv 权重直接复制，LayerNorm 权重需要 reshape 并取 mean
+    model_gn.conv1.weight.data = torch.from_numpy(onnx_weights['conv1_weight'].copy())
+    model_gn.conv2.weight.data = torch.from_numpy(onnx_weights['conv2_weight'].copy())
+    model_gn.sep_conv1.weight.data = torch.from_numpy(onnx_weights['sep_conv1_weight'].copy())
+    model_gn.sep_conv2.weight.data = torch.from_numpy(onnx_weights['sep_conv2_weight'].copy())
+    model_gn.fc.weight.data = torch.from_numpy(onnx_weights['fc_weight'].copy())
+    model_gn.fc.bias.data = torch.from_numpy(onnx_weights['fc_bias'].copy())
+
+    # LayerNorm weights [C, H, W] -> GroupNorm weights [C] via mean
+    for ln_name, gn_module in [('layer_norm1', model_gn.layer_norm1),
+                                ('layer_norm2', model_gn.layer_norm2),
+                                ('layer_norm3', model_gn.layer_norm3)]:
+        w = onnx_weights[f'{ln_name}_weight']  # [C, H, W]
+        b = onnx_weights[f'{ln_name}_bias']    # [C, H, W]
+        # Convert to [C] by averaging over spatial dimensions
+        gn_module.weight.data = torch.from_numpy(w.reshape(w.shape[0], -1).mean(axis=1).copy())
+        gn_module.bias.data = torch.from_numpy(b.reshape(b.shape[0], -1).mean(axis=1).copy())
+
+    print(f"✅ Loaded weights from ONNX into GroupNorm model")
+
+    # 3. 执行 PyTorch 计算 (使用 GroupNorm 模型)
+    model_gn.train()
+    criterion = nn.CrossEntropyLoss()
+    learning_rate = load_train_config()
+
+    model_gn.zero_grad()
+    output = model_gn(input_data)
+    loss = criterion(output, labels)
+    loss.backward()
+
+    # 4. 有选择性地提取梯度并执行 SGD 更新
+    sgd_outputs = {}
+    
+    # 将 ONNX 风格的名字映射回 PyTorch 风格 (用于匹配)
+    # 例如：'fc_weight' -> 'fc.weight'
+    # 注意：这里假设转换规律是 '_' 变 '.'，如果模型有更深的层级，可能需要更复杂的映射
+    print(f"\n📋 Filtering gradients based on selected list ({len(requires_grad_list)} params):")
+    print(f"   Using GroupNorm model for gradient-compatible reference output")
+
+    for name, param in model_gn.named_parameters():
+        # 将 PyTorch 名字转换为 ONNX 格式进行匹配
+        onnx_name = name.replace('.', '_')
+        
+        if onnx_name in requires_grad_list:
+            if param.grad is not None:
+                # SGD update: param_new = param_old - lr * grad
+                param_updated = param.data - learning_rate * param.grad.data
+                param_updated_np = param_updated.cpu().numpy()
+
+                output_key = f"{onnx_name}_updated"
+                sgd_outputs[output_key] = param_updated_np
+                print(f"   - [Selected] Updated {onnx_name} (shape: {param_updated_np.shape})")
+    output_file = os.path.join(base_path, "outputs.npz")
+    if sgd_outputs:
+        np.savez(output_file, **sgd_outputs)
+        print(f"✅ Selected SGD updated parameters saved to {output_file}")
+    else:
+        print("⚠️ Warning: No matching parameters from requires_grad_list were found or updated!")
+        
+    return input_file
+
+debug_data = {
+    'forward_output': None,
+    'backward_grad_output': None,
+    'backward_grad_input': None
+}
+
+def debug_hook(module, input, output):
+  
+    debug_data['forward_output'] = output.detach().cpu().numpy()
+
+def debug_grad_hook(module, grad_input, grad_output):
+  
+    debug_data['backward_grad_output'] = grad_output[0].detach().cpu().numpy()
+    debug_data['backward_grad_input'] = grad_input[0].detach().cpu().numpy() if grad_input[0] is not None else None

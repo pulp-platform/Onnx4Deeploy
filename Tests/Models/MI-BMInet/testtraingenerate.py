@@ -12,7 +12,7 @@ from utils.fixShape import *
 from utils.utils import *
 from utils.checkNetworkstructure import *
 from utils.appendOptimizer import *
-from utils.trainOptimization import convert_layernorm_to_groupnorm
+from utils.trainOptimization import split_gn_to_single_stat_array
 
 
 def load_config(config_filename="config.yaml"):
@@ -238,14 +238,15 @@ def generate_mi_bminet_training_onnx(save_path=None):
             # "layer_norm3_weight",  # Fixed: removed leading space
             # "layer_norm3_bias",
             "conv1_weight",
+            "layer_norm3_weight",
+            # "layer_norm1_weight",
+            # "layer_norm3_weight",
+            "layer_norm2_weight",
             "layer_norm1_weight",
-            # "conv1_bias",
             "conv2_weight",
-            # "conv2_bias",
             "sep_conv1_weight",
-            # "sep_conv1_bias",
             "sep_conv2_weight",
-            # "sep_conv2_bias",
+           
         ]
     ]
 
@@ -327,7 +328,7 @@ def generate_mi_bminet_training_onnx(save_path=None):
     print(f"📊 Training ONNX model saved to {onnx_output_file}")
 
     # Create test input and output data
-    create_test_input_output(base_path, batch_size, C, T, N)
+    create_test_input_output_pytorch(base_path, batch_size, C, T, N, model, requires_grad)
     print(f"✅ Created test input and output data")
     
     # Add SGD optimizer nodes
@@ -343,6 +344,12 @@ def generate_mi_bminet_training_onnx(save_path=None):
     # Convert LayerNorm to GroupNorm for deployment
     convert_layernorm_to_groupnorm(onnx_output_file, onnx_output_file, num_groups=1)
     print(f"✅ Converted LayerNorm to GroupNorm in {onnx_output_file}")
+
+    # Split GroupNorm into GroupNormalizationStat + GroupNormalization
+    # This makes forward stat available for backward pass
+    split_gn_to_single_stat_array(onnx_output_file, onnx_output_file)
+    print(f"✅ Split GroupNorm into Stat + Norm in {onnx_output_file}")
+    # infer_shapes_with_custom_ops(onnx_output_file, onnx_output_file)
 
     print(f"\n🎉 MI-BMINet training model generation complete!")
     print(f"📁 Output directory: {base_path}")
