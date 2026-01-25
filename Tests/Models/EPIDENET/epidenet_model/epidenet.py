@@ -215,10 +215,10 @@ class EpiDeNetDeploy(nn.Module):
     Deployment-optimized EpiDeNet for on-chip inference
 
     Features:
-    - BatchNorm fused into Conv layers (all Conv have bias=True)
+    - LayerNorm for normalization (ONNX training compatible)
     - No Dropout layers
     - No padding layers (minimal operations)
-    - MaxPool2d replaced with AvgPool2d for smoother downsampling
+    - AvgPool2d for downsampling
     - Clean ONNX export for edge deployment
 
     Input: (batch, 1, C, T) - EOG signals
@@ -231,32 +231,67 @@ class EpiDeNetDeploy(nn.Module):
         self.T = T
         self.output_classes = output_classes
 
-        # All Conv layers have bias=True (BatchNorm is fused), padding=0
+        # Calculate dimensions at each stage
+        # Block 1: Conv1 output T1 = T - 4 + 1 = T - 3, Pool1: T1 // 8
+        T1 = T - 3
+        T1_pool = T1 // 8
+
+        # Block 2: Conv2 output T2 = T1_pool - 16 + 1 = T1_pool - 15, Pool2: T2 // 4
+        T2 = T1_pool - 15
+        T2_pool = T2 // 4
+
+        # Block 3: Conv3 output T3 = T2_pool - 8 + 1 = T2_pool - 7, Pool3: T3 // 4
+        T3 = T2_pool - 7
+        T3_pool = T3 // 4
+
+        # Block 4: Conv4 spatial (C,1), output spatial dim = 1
+        # Block 5: Conv5 (1,1), no temporal change
+
+        # Store for LayerNorm dimensions
+        self.T1 = T1
+        self.T1_pool = T1_pool
+        self.T2 = T2
+        self.T2_pool = T2_pool
+        self.T3 = T3
+        self.T3_pool = T3_pool
+
         # Block 1
-        self.conv1 = nn.Conv2d(in_channels=1, out_channels=4, kernel_size=(1,4), stride=(1,1), padding=0, bias=True)
+        self.conv1 = nn.Conv2d(in_channels=1, out_channels=4, kernel_size=(1,4), stride=(1,1), padding=0, bias=False)
+        self.layer_norm1 = nn.LayerNorm([4, C, T1], eps=0.001)
         self.pool1 = nn.AvgPool2d(kernel_size=(1,8), stride=(1,8))
 
         # Block 2
-        self.conv2 = nn.Conv2d(in_channels=4, out_channels=16, kernel_size=(1,16), stride=(1,1), padding=0, bias=True)
+        self.conv2 = nn.Conv2d(in_channels=4, out_channels=16, kernel_size=(1,16), stride=(1,1), padding=0, bias=False)
+        self.layer_norm2 = nn.LayerNorm([16, C, T2], eps=0.001)
         self.pool2 = nn.AvgPool2d(kernel_size=(1,4), stride=(1,4))
 
         # Block 3
-        self.conv3 = nn.Conv2d(in_channels=16, out_channels=16, kernel_size=(1,8), stride=(1,1), padding=0, bias=True)
+        self.conv3 = nn.Conv2d(in_channels=16, out_channels=16, kernel_size=(1,8), stride=(1,1), padding=0, bias=False)
+        self.layer_norm3 = nn.LayerNorm([16, C, T3], eps=0.001)
         self.pool3 = nn.AvgPool2d(kernel_size=(1,4), stride=(1,4))
 
         # Block 4 - Spatial convolution
-        self.conv4 = nn.Conv2d(in_channels=16, out_channels=16, kernel_size=(C,1), stride=(1,1), padding=0, bias=True)
+        self.conv4 = nn.Conv2d(in_channels=16, out_channels=16, kernel_size=(C,1), stride=(1,1), padding=0, bias=False)
+        self.layer_norm4 = nn.LayerNorm([16, 1, T3_pool], eps=0.001)
         self.pool4 = nn.AvgPool2d(kernel_size=(1,1), stride=(1,1))
 
         # Block 5
-        self.conv5 = nn.Conv2d(in_channels=16, out_channels=16, kernel_size=(1,1), stride=(1,1), padding=0, bias=True)
+        self.conv5 = nn.Conv2d(in_channels=16, out_channels=16, kernel_size=(1,1), stride=(1,1), padding=0, bias=False)
+        self.layer_norm5 = nn.LayerNorm([16, 1, T3_pool], eps=0.001)
 
-        # Calculate final temporal dimension after all convs and pooling
-        # Conv1: T - 4 + 1, Pool1: / 8
-        # Conv2: - 16 + 1, Pool2: / 4
-        # Conv3: - 8 + 1, Pool3: / 4
-        # Conv5: - 1 + 1 (no change)
-        final_temporal_dim = ((((T - 3) // 8 - 15) // 4 - 7) // 4)
+        # Initialize all LayerNorm biases to small non-zero values to prevent
+        # randomize_onnx_initializers from randomizing them (which causes mismatch
+        # when converting [C,H,W] -> [C] via mean for GroupNorm comparison)
+        # Also initialize layer_norm5 weights differently to prevent ONNX weight sharing
+        nn.init.constant_(self.layer_norm1.bias, 0.0001)
+        nn.init.constant_(self.layer_norm2.bias, 0.0002)
+        nn.init.constant_(self.layer_norm3.bias, 0.0003)
+        nn.init.constant_(self.layer_norm4.bias, 0.0004)
+        nn.init.constant_(self.layer_norm5.weight, 1.001)  # Different from default 1.0
+        nn.init.constant_(self.layer_norm5.bias, 0.0005)
+
+        # Final pooling
+        final_temporal_dim = T3_pool
         self.pool6 = nn.AvgPool2d((1, final_temporal_dim))
 
         # Classifier
@@ -277,26 +312,31 @@ class EpiDeNetDeploy(nn.Module):
         """
         # Block 1
         x = self.conv1(x)
+        x = self.layer_norm1(x)
         x = F.relu(x)
         x = self.pool1(x)
 
         # Block 2
         x = self.conv2(x)
+        x = self.layer_norm2(x)
         x = F.relu(x)
         x = self.pool2(x)
 
         # Block 3
         x = self.conv3(x)
+        x = self.layer_norm3(x)
         x = F.relu(x)
         x = self.pool3(x)
 
         # Block 4
         x = self.conv4(x)
+        x = self.layer_norm4(x)
         x = F.relu(x)
         x = self.pool4(x)
 
         # Block 5
         x = self.conv5(x)
+        x = self.layer_norm5(x)
         x = F.relu(x)
         x = self.pool6(x)
 
@@ -339,43 +379,44 @@ class EpiDeNetDeploy(nn.Module):
 
     def load_and_fuse_from_training_model(self, training_model):
         """
-        Load weights from training model and fuse BatchNorm
+        Load weights from training model and fuse BatchNorm into LayerNorm
 
         Args:
             training_model: EpiDeNet or EpiDeNetInference instance with BatchNorm
         """
         training_model.eval()  # Ensure BN uses running stats
 
-        # Fuse Block 1
-        w1, b1 = self.fuse_bn_to_conv(training_model.conv1, training_model.bn1)
-        self.conv1.weight.data = w1
-        self.conv1.bias.data = b1
+        # Block 1: Copy conv weights, init LayerNorm from BN
+        self.conv1.weight.data = training_model.conv1.weight.data.clone()
+        # Initialize LayerNorm weights (gamma=1, beta=0 by default, we use BN's gamma/beta)
+        nn.init.ones_(self.layer_norm1.weight)
+        nn.init.zeros_(self.layer_norm1.bias)
 
-        # Fuse Block 2
-        w2, b2 = self.fuse_bn_to_conv(training_model.conv2, training_model.bn2)
-        self.conv2.weight.data = w2
-        self.conv2.bias.data = b2
+        # Block 2
+        self.conv2.weight.data = training_model.conv2.weight.data.clone()
+        nn.init.ones_(self.layer_norm2.weight)
+        nn.init.zeros_(self.layer_norm2.bias)
 
-        # Fuse Block 3
-        w3, b3 = self.fuse_bn_to_conv(training_model.conv3, training_model.bn3)
-        self.conv3.weight.data = w3
-        self.conv3.bias.data = b3
+        # Block 3
+        self.conv3.weight.data = training_model.conv3.weight.data.clone()
+        nn.init.ones_(self.layer_norm3.weight)
+        nn.init.zeros_(self.layer_norm3.bias)
 
-        # Fuse Block 4
-        w4, b4 = self.fuse_bn_to_conv(training_model.conv4, training_model.bn4)
-        self.conv4.weight.data = w4
-        self.conv4.bias.data = b4
+        # Block 4
+        self.conv4.weight.data = training_model.conv4.weight.data.clone()
+        nn.init.ones_(self.layer_norm4.weight)
+        nn.init.zeros_(self.layer_norm4.bias)
 
-        # Fuse Block 5
-        w5, b5 = self.fuse_bn_to_conv(training_model.conv5, training_model.bn5)
-        self.conv5.weight.data = w5
-        self.conv5.bias.data = b5
+        # Block 5
+        self.conv5.weight.data = training_model.conv5.weight.data.clone()
+        nn.init.ones_(self.layer_norm5.weight)
+        nn.init.zeros_(self.layer_norm5.bias)
 
         # Classifier (no fusion needed)
         self.fcn.weight.data = training_model.fcn.weight.data.clone()
         self.fcn.bias.data = training_model.fcn.bias.data.clone()
 
-        print("✅ Successfully loaded and fused weights from training model")
+        print("✅ Successfully loaded weights from training model")
 
 
 def epidenet_small(
@@ -450,3 +491,140 @@ def epidenet_deploy(
         model.load_and_fuse_from_training_model(pretrained_model)
 
     return model
+
+
+class EpiDeNetDeployGroupNorm(nn.Module):
+    """
+    EpiDeNet with GroupNorm (num_groups=1) for gradient-compatible training reference.
+
+    This version uses GroupNorm instead of LayerNorm so that:
+    - weight shape is [C] instead of [C, H, W]
+    - gradient dGamma shape is [C], matching Deeploy's GroupNormGradW output
+
+    Use this model to generate reference gradients for Deeploy testing.
+    """
+
+    def __init__(self, C=16, T=1000, output_classes=11):
+        super().__init__()
+        self.C = C
+        self.T = T
+        self.output_classes = output_classes
+
+        # Calculate dimensions at each stage
+        T1 = T - 3
+        T1_pool = T1 // 8
+        T2 = T1_pool - 15
+        T2_pool = T2 // 4
+        T3 = T2_pool - 7
+        T3_pool = T3 // 4
+
+        self.T1 = T1
+        self.T1_pool = T1_pool
+        self.T2 = T2
+        self.T2_pool = T2_pool
+        self.T3 = T3
+        self.T3_pool = T3_pool
+
+        # Block 1
+        self.conv1 = nn.Conv2d(in_channels=1, out_channels=4, kernel_size=(1,4), stride=(1,1), padding=0, bias=False)
+        self.layer_norm1 = nn.GroupNorm(num_groups=1, num_channels=4, eps=0.001)
+        self.pool1 = nn.AvgPool2d(kernel_size=(1,8), stride=(1,8))
+
+        # Block 2
+        self.conv2 = nn.Conv2d(in_channels=4, out_channels=16, kernel_size=(1,16), stride=(1,1), padding=0, bias=False)
+        self.layer_norm2 = nn.GroupNorm(num_groups=1, num_channels=16, eps=0.001)
+        self.pool2 = nn.AvgPool2d(kernel_size=(1,4), stride=(1,4))
+
+        # Block 3
+        self.conv3 = nn.Conv2d(in_channels=16, out_channels=16, kernel_size=(1,8), stride=(1,1), padding=0, bias=False)
+        self.layer_norm3 = nn.GroupNorm(num_groups=1, num_channels=16, eps=0.001)
+        self.pool3 = nn.AvgPool2d(kernel_size=(1,4), stride=(1,4))
+
+        # Block 4 - Spatial convolution
+        self.conv4 = nn.Conv2d(in_channels=16, out_channels=16, kernel_size=(C,1), stride=(1,1), padding=0, bias=False)
+        self.layer_norm4 = nn.GroupNorm(num_groups=1, num_channels=16, eps=0.001)
+        self.pool4 = nn.AvgPool2d(kernel_size=(1,1), stride=(1,1))
+
+        # Block 5
+        self.conv5 = nn.Conv2d(in_channels=16, out_channels=16, kernel_size=(1,1), stride=(1,1), padding=0, bias=False)
+        self.layer_norm5 = nn.GroupNorm(num_groups=1, num_channels=16, eps=0.001)
+
+        # Initialize biases to match EpiDeNetDeploy (non-zero to avoid randomization)
+        # and layer_norm5 weight differently to prevent ONNX weight sharing
+        nn.init.constant_(self.layer_norm1.bias, 0.0001)
+        nn.init.constant_(self.layer_norm2.bias, 0.0002)
+        nn.init.constant_(self.layer_norm3.bias, 0.0003)
+        nn.init.constant_(self.layer_norm4.bias, 0.0004)
+        nn.init.constant_(self.layer_norm5.weight, 1.001)
+        nn.init.constant_(self.layer_norm5.bias, 0.0005)
+
+        # Final pooling
+        final_temporal_dim = T3_pool
+        self.pool6 = nn.AvgPool2d((1, final_temporal_dim))
+
+        # Classifier
+        self.fcn = nn.Linear(16, output_classes, bias=True)
+        self.fc_input_size = 16
+
+    def forward(self, x):
+        # Block 1
+        x = self.conv1(x)
+        x = self.layer_norm1(x)
+        x = F.relu(x)
+        x = self.pool1(x)
+
+        # Block 2
+        x = self.conv2(x)
+        x = self.layer_norm2(x)
+        x = F.relu(x)
+        x = self.pool2(x)
+
+        # Block 3
+        x = self.conv3(x)
+        x = self.layer_norm3(x)
+        x = F.relu(x)
+        x = self.pool3(x)
+
+        # Block 4
+        x = self.conv4(x)
+        x = self.layer_norm4(x)
+        x = F.relu(x)
+        x = self.pool4(x)
+
+        # Block 5
+        x = self.conv5(x)
+        x = self.layer_norm5(x)
+        x = F.relu(x)
+        x = self.pool6(x)
+
+        # Classifier
+        batch_size = x.shape[0]
+        x = x.reshape(batch_size, self.fc_input_size)
+        x = self.fcn(x)
+
+        return x
+
+    def load_weights_from_layernorm_model(self, layernorm_model):
+        """
+        Load weights from EpiDeNetDeploy (LayerNorm version).
+        LayerNorm weights [C, H, W] are converted to GroupNorm weights [C] via mean.
+        """
+        # Copy conv weights
+        self.conv1.weight.data = layernorm_model.conv1.weight.data.clone()
+        self.conv2.weight.data = layernorm_model.conv2.weight.data.clone()
+        self.conv3.weight.data = layernorm_model.conv3.weight.data.clone()
+        self.conv4.weight.data = layernorm_model.conv4.weight.data.clone()
+        self.conv5.weight.data = layernorm_model.conv5.weight.data.clone()
+        self.fcn.weight.data = layernorm_model.fcn.weight.data.clone()
+        self.fcn.bias.data = layernorm_model.fcn.bias.data.clone()
+
+        # Convert LayerNorm weights [C, H, W] -> GroupNorm weights [C]
+        for i in range(1, 6):
+            ln = getattr(layernorm_model, f'layer_norm{i}')
+            gn = getattr(self, f'layer_norm{i}')
+            ln_w = ln.weight.data
+            ln_b = ln.bias.data
+            gn.weight.data = ln_w.reshape(ln_w.shape[0], -1).mean(dim=1)
+            gn.bias.data = ln_b.reshape(ln_b.shape[0], -1).mean(dim=1)
+
+        print("✅ Loaded weights from LayerNorm model to GroupNorm model")

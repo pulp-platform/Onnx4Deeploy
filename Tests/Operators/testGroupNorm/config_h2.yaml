@@ -1,0 +1,7 @@
+groupnorm:
+  # Test case with H > 1 (matching EPIDENET ln1 shape)
+  # This tests GroupNorm with non-trivial spatial dimensions
+  input_shape: [1, 4, 2, 997]   # [N, C, H, W] - H=2 like EPIDENET ln1
+  num_groups: 1                   # Number of groups (1 = LayerNorm behavior)
+  epsilon: 0.001                  # Small constant for numerical stability
+  opset_version: 13
