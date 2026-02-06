@@ -1,9 +1,0 @@
-groupnorm:
-  # Input/output shapes for GroupNorm
-  # Computes forward pass of GroupNorm
-  # Input shape: [N, C, H, W] or [N, C, 1, T] for 1D signals
-  # Output shape: [N, C, H, W] (same as input)
-  input_shape: [1, 8, 1, 64]      # [N, C, H, W]
-  num_groups: 1                    # Number of groups (1 = LayerNorm behavior)
-  epsilon: 0.001                   # Small constant for numerical stability
-  opset_version: 13

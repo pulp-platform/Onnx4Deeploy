@@ -1,1 +1,0 @@
-# GroupNormGradB test module

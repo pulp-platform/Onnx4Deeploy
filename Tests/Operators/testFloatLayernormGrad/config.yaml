@@ -1,2 +1,0 @@
-layernormgrad:
-  input_shape: [1, 32, 32]

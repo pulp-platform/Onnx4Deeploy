@@ -1,9 +1,0 @@
-                _NCHW_TO_NHWC_MAXPOOL_PASS_0_TransposeIn_In: {
-                        MemoryLevel: L2, Size: 32768, MultiBuffer: 1 Shape: (1, 16, 16, 128)
-                        MemoryLevel: L1, Size: 13312, MultiBuffer: 1 Shape: (1, 16, 16, 52)
-                }
-                _NCHW_TO_NHWC_MAXPOOL_PASS_0_TransposeOut_Out: {
-                        MemoryLevel: L2, Size: 6272, MultiBuffer: 1 Shape: (1, 7, 7, 128)
-                        MemoryLevel: L1, Size: 2548, MultiBuffer: 1 Shape: (1, 7, 7, 52)
-                }
-        }

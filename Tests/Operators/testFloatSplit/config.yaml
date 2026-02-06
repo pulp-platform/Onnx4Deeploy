@@ -1,4 +1,0 @@
-split:
-  input_shape: [1, 64, 128]
-  axis: 1  # Split along the channel dimension
-  num_outputs: 2  # Split into 2 outputs

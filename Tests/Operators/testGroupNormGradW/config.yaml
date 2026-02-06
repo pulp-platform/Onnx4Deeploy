@@ -1,9 +1,0 @@
-groupnormgradw:
-  # Input/output shapes for GroupNormGradW
-  # Computes gradient w.r.t. gamma (scale parameter)
-  # Input shape: [N, C, H, W] or [N, C, 1, T] for 1D signals
-  # Output shape: [C] (gradient for gamma)
-  input_shape: [1, 8, 1, 64]      # [N, C, H, W]
-  num_groups: 1                    # Number of groups (1 = LayerNorm behavior)
-  epsilon: 0.001                   # Small constant for numerical stability
-  opset_version: 13

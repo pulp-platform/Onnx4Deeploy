@@ -1,1 +1,0 @@
-# GroupNormGradW test module

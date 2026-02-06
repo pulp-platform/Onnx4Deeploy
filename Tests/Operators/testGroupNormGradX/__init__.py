@@ -1,1 +1,0 @@
-# GroupNormGradX test module

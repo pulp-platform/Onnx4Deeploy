@@ -1,2 +1,0 @@
-softmax_cross_entropy:
-  input_shape: [4, 10]

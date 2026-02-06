@@ -1,9 +1,0 @@
-conv2d:
-  input_shape: [1, 64, 16, 16]   # (batch_size, in_channels, height, width)
-  kernel_size: 3
-  stride: 1
-  padding: 1
-  out_channels: 128
-  use_bias: False
-  group: 1
-  dilation: 1

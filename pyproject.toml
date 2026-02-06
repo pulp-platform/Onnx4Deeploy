@@ -1,0 +1,146 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "onnx4deeploy"
+version = "0.2.0"
+description = "ONNX model generation and optimization framework for deep learning deployment"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "Onnx4Deeploy Contributors"}
+]
+keywords = ["onnx", "deep-learning", "model-optimization", "pytorch"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "torch>=2.0.0",
+    "onnx==1.16.0",
+    "onnx-graphsurgeon==0.5.8",
+    "onnxruntime==1.21.1",
+    "onnxruntime-training==1.19.2",
+    "onnxsim==0.4.36",
+    "numpy>=1.24.0",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "flake8>=6.0.0",
+    "isort>=5.12.0",
+    "mypy>=1.0.0",
+    "pre-commit>=3.0.0",
+]
+visualization = [
+    "beautifulsoup4>=4.0.0",
+    "pandas>=2.0.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/runwangdl/Onnx4Deeploy"
+Repository = "https://github.com/runwangdl/Onnx4Deeploy"
+
+[tool.setuptools]
+packages = ["onnx4deeploy"]
+
+[tool.setuptools.package-data]
+onnx4deeploy = ["visualization/assets/**/*"]
+
+[tool.black]
+line-length = 100
+target-version = ['py39', 'py310', 'py311']
+include = '\.pyi?$'
+extend-exclude = '''
+/(
+  # directories
+  \.eggs
+  | \.git
+  | \.hg
+  | \.mypy_cache
+  | \.tox
+  | \.venv
+  | build
+  | dist
+  | legacy
+)/
+'''
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "--verbose",
+    "--strict-markers",
+    # Coverage disabled for now - install pytest-cov to enable
+    # "--cov=onnx4deeploy",
+    # "--cov-report=html",
+    # "--cov-report=term-missing",
+]
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    "integration: marks tests as integration tests",
+    "baseline: tests that require baseline comparison",
+    "inference: marks tests for inference mode",
+    "training: marks tests for training mode",
+]
+
+[tool.isort]
+profile = "black"
+line_length = 100
+skip_gitignore = true
+known_first_party = ["onnx4deeploy"]
+known_third_party = ["numpy", "onnx", "onnxruntime", "torch", "yaml", "pytest"]
+src_paths = ["."]
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+disallow_incomplete_defs = false
+check_untyped_defs = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+strict_equality = true
+ignore_missing_imports = true
+
+[[tool.mypy.overrides]]
+module = [
+    "torch.*",
+    "onnx.*",
+    "onnxruntime.*",
+    "numpy.*",
+]
+ignore_missing_imports = true
+
+[tool.flake8]
+max-line-length = 100
+extend-ignore = [
+    "E203", "W503",  # Black compatibility
+    "E501",  # Line too long
+    "F821", "F841", "F402", "F541", "F403", "F401",  # Undefined/unused names
+    "E722",  # Bare except
+    "D107", "D102", "D200", "D401", "D400", "D205", "D103", "D105", "D100", "D101", "D104", "D202", "D403",  # Docstring issues
+    "B027", "B007", "B001", "B026", "B006"  # Bugbear warnings
+]
+exclude = [".git", "__pycache__", "build", "dist", "legacy"]
+per-file-ignores = ["__init__.py:F401"]

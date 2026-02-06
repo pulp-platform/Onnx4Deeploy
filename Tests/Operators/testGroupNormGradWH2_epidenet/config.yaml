@@ -1,9 +1,0 @@
-groupnormgradw:
-  # Input/output shapes for GroupNormGradW with H=2
-  # Using EXACT same data as EPIDENET layer_norm3
-  # Input shape: [N=1, C=16, H=2, W=20]
-  # Output shape: [C=16] (gradient for gamma)
-  input_shape: [1, 16, 2, 20]
-  num_groups: 1
-  epsilon: 0.001
-  opset_version: 13

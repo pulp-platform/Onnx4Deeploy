@@ -1,2 +1,0 @@
-relugrad:
-  input_shape: [1, 16, 1, 227]  # Shape for gradient and original input

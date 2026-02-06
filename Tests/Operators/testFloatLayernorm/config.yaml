@@ -1,4 +1,0 @@
-layernorm:
-  input_shape: [1, 32, 1024]  # Batch, Sequence, Hidden
-  axis: -1  # Normalize along the last dimension (hidden)
-  epsilon: 0.00001  # Small constant for numerical stability

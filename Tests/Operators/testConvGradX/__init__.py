@@ -1,1 +1,0 @@
-# ConvGradX operator test package

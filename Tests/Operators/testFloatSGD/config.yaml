@@ -1,4 +1,0 @@
-sgd:
-  weight_shape: [10, 8]  # Shape of weights tensor (num_classes, embedding_dim)
-  bias_shape: [10]       # Shape of bias tensor (num_classes)
-  learning_rate: 0.01    # Learning rate for SGD update

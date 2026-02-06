@@ -1,0 +1,107 @@
+name: CI
+
+on:
+  push:
+    branches: [main, devel, 'refactor/**']
+  pull_request:
+    branches: [main, devel]
+  workflow_dispatch:
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.10'
+
+    - name: Install linting tools
+      run: |
+        python -m pip install --upgrade pip
+        pip install black==24.1.1 isort==5.13.2 flake8 flake8-docstrings flake8-bugbear
+
+    - name: Check code formatting with black
+      run: |
+        black --check --diff onnx4deeploy/ tests/
+
+    - name: Check import sorting with isort
+      run: |
+        isort --check --diff onnx4deeploy/ tests/
+
+    - name: Lint with flake8
+      run: |
+        flake8 onnx4deeploy/ tests/ --max-line-length=100 --extend-ignore=E203,W503,E501,F821,F841,E722,F402,F541,F403,F401,D107,D102,D200,D401,D400,D205,D103,D105,D100,D101,D104,D202,D403,B027,B007,B001,B026,B006 --exclude=.git,__pycache__,build,dist,legacy --statistics
+
+  test-operators:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.10']
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip setuptools wheel
+        pip install --no-cache-dir onnx==1.16.0 onnx-graphsurgeon==0.5.8 onnxruntime==1.21.1 onnxruntime-training==1.19.2 onnxsim==0.4.36
+        pip install -e .
+        pip install pytest pytest-cov
+
+    - name: Run operator tests
+      run: |
+        python -m pytest tests/operators/ -v
+
+    - name: Upload coverage reports
+      if: matrix.python-version == '3.10'
+      uses: codecov/codecov-action@v4
+      with:
+        file: ./coverage.xml
+        flags: operators
+        name: operator-tests
+        fail_ci_if_error: false
+
+  test-core:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ['3.10']
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip setuptools wheel
+        pip install --no-cache-dir onnx==1.16.0 onnx-graphsurgeon==0.5.8 onnxruntime==1.21.1 onnxruntime-training==1.19.2 onnxsim==0.4.36
+        pip install -e .
+        pip install pytest pytest-cov
+
+    - name: Run core tests
+      run: |
+        python -m pytest tests/core/ -v
+
+    - name: Upload coverage reports
+      if: matrix.python-version == '3.10'
+      uses: codecov/codecov-action@v4
+      with:
+        file: ./coverage.xml
+        flags: core
+        name: core-tests
+        fail_ci_if_error: false

@@ -1,1 +1,0 @@
-# GroupNorm test module

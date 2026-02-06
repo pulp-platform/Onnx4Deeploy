@@ -1,40 +1,77 @@
-Tests/Models/CCT/onnx/
-Tests/Models/CCT/__pycache__/
-/app/Onnx4Deeploy/Tests/Operators/*/onnx/
-/app/Onnx4Deeploy/utils/node_outputs/
-Tests/Models/CCT/__pycache__/mnistCheckpoint.cpython-310.pyc
-Tests/Models/CCT/utils/__pycache__/__init__.cpython-310.pyc
-Tests/Models/CCT/utils/__pycache__/appendoptimizer.cpython-310.pyc
-Tests/Models/CCT/utils/__pycache__/fixshape.cpython-310.pyc
-Tests/Models/CCT/utils/__pycache__/trainoptimization.cpython-310.pyc
-Tests/Models/CCT/utils/__pycache__/utils.cpython-310.pyc
-Tests/Models/CCT/__pycache__/mnistCheckpoint.cpython-310.pyc
-Tests/Operators/testFloatSGD/onnx/sgd_test/inputs.npz
-Tests/Operators/testFloatSGD/onnx/sgd_test/network.onnx
-Tests/Operators/testFloatSGD/onnx/sgd_test/outputs.npz
-Tests/Operators/testFloatSGD/onnx/sgd_test/sgd_reference.py
-Report/*
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
 
-Tests/Models/CCT/__pycache__/mnistCheckpoint.cpython-310.pyc
-Tests/Models/CCT/CCT/__pycache__/cct.cpython-310.pyc
-Tests/Models/CCT/CCT/__pycache__/registry.cpython-310.pyc
-Tests/Models/CCT/CCT/utils/__pycache__/__init__.cpython-310.pyc
-Tests/Models/CCT/CCT/utils/__pycache__/helpers.cpython-310.pyc
-Tests/Models/CCT/CCT/utils/__pycache__/stochastic_depth.cpython-310.pyc
-Tests/Models/CCT/CCT/utils/__pycache__/tokenizer.cpython-310.pyc
-Tests/Models/CCT/CCT/utils/__pycache__/transformers.cpython-310.pyc
-Tests/Models/MI-BMInet/__pycache__/testinfergenerate.cpython-310.pyc
-Tests/Models/MI-BMInet/__pycache__/testtraingenerate.cpython-310.pyc
-Tests/Models/MI-BMInet/data/MNIST/raw/t10k-images-idx3-ubyte
-Tests/Models/MI-BMInet/data/MNIST/raw/t10k-images-idx3-ubyte.gz
-Tests/Models/MI-BMInet/data/MNIST/raw/t10k-labels-idx1-ubyte
-Tests/Models/MI-BMInet/data/MNIST/raw/t10k-labels-idx1-ubyte.gz
-Tests/Models/MI-BMInet/data/MNIST/raw/train-images-idx3-ubyte
-Tests/Models/MI-BMInet/data/MNIST/raw/train-images-idx3-ubyte.gz
-Tests/Models/MI-BMInet/data/MNIST/raw/train-labels-idx1-ubyte
-Tests/Models/MI-BMInet/data/MNIST/raw/train-labels-idx1-ubyte.gz
-Tests/Models/MI-BMInet/mi_bminet_model/__pycache__/__init__.cpython-310.pyc
-Tests/Models/MI-BMInet/mi_bminet_model/__pycache__/mi_bminet.cpython-310.pyc
+# PyInstaller
+*.manifest
+*.spec
 
+# Unit test / coverage reports
+htmlcov/
+.tox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+.hypothesis/
+.pytest_cache/
 
-/app/Onnx4Deeploy/Tests/Models/MI-BMInet/onnx/*
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# ONNX outputs
+*.onnx
+*.npz
+outputs/
+onnx/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Temporary files
+*.log
+*.tmp
+temp/
+
+# Test outputs
+test_outputs/

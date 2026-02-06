@@ -1,4 +1,0 @@
-reducesum:
-  input_shape: [3, 4, 5]  # Example input tensor shape
-  axes: [1]               # Reduce along axis 1 (second dimension)
-  keepdims: 1             # Keep reduced dimensions (as size 1)
