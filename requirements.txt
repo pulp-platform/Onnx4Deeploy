@@ -1,11 +1,11 @@
 # Core dependencies
 torch>=2.0.0
-onnx==1.16.0
-onnx-graphsurgeon==0.5.8
-onnxruntime==1.21.1
+onnx>=1.15.0,<1.17.0
+onnx-graphsurgeon>=0.5.0
 onnxruntime-training==1.19.2
-onnxsim==0.4.36
-numpy>=1.24.0
+onnxscript>=0.1.0
+onnxsim>=0.4.0
+numpy>=1.24.0,<2.0.0
 pyyaml>=6.0
 
 # Optional visualization dependencies

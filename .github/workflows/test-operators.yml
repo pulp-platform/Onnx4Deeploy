@@ -8,6 +8,36 @@ on:
   workflow_dispatch:
 
 jobs:
+  # Quick check - package installation
+  install-check:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.9', '3.10', '3.11']
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python ${{ matrix.python-version }}
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ matrix.python-version }}
+
+    - name: Install package
+      run: |
+        python -m pip install --upgrade pip setuptools wheel
+        pip install -e ".[dev]"
+
+    - name: Verify installation
+      run: |
+        python -c "import onnx4deeploy; print(f'Version: {onnx4deeploy.__version__}')"
+        python -c "import onnx4deeploy.core; print('✓ core')"
+        python -c "import onnx4deeploy.operators; print('✓ operators')"
+        python -c "import onnx4deeploy.models; print('✓ models')"
+        python -c "import onnx4deeploy.optimization; print('✓ optimization')"
+
   lint:
     runs-on: ubuntu-latest
     steps:
@@ -39,8 +69,9 @@ jobs:
   test-operators:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ['3.10']
+        python-version: ['3.9', '3.10', '3.11']
 
     steps:
     - name: Checkout code
@@ -54,9 +85,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip setuptools wheel
-        pip install --no-cache-dir onnx==1.16.0 onnx-graphsurgeon==0.5.8 onnxruntime==1.21.1 onnxruntime-training==1.19.2 onnxsim==0.4.36
-        pip install -e .
-        pip install pytest pytest-cov
+        pip install -e ".[dev]"
 
     - name: Run operator tests
       run: |
@@ -74,8 +103,9 @@ jobs:
   test-core:
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
-        python-version: ['3.10']
+        python-version: ['3.9', '3.10', '3.11']
 
     steps:
     - name: Checkout code
@@ -89,9 +119,7 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip setuptools wheel
-        pip install --no-cache-dir onnx==1.16.0 onnx-graphsurgeon==0.5.8 onnxruntime==1.21.1 onnxruntime-training==1.19.2 onnxsim==0.4.36
-        pip install -e .
-        pip install pytest pytest-cov
+        pip install -e ".[dev]"
 
     - name: Run core tests
       run: |
