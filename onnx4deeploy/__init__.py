@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 ETH Zurich and University of Bologna
+#
+# SPDX-License-Identifier: MIT
+
 """
 Onnx4Deeploy - ONNX model generation and optimization framework
 

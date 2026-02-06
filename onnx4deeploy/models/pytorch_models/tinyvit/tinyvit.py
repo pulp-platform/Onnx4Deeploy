@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 ETH Zurich and University of Bologna
+#
+# SPDX-License-Identifier: MIT
+
 """TinyViT Model for ONNX Export.
 
 Based on "TinyViT: Fast Pretraining Distillation for Small Vision Transformers" (ECCV 2022)

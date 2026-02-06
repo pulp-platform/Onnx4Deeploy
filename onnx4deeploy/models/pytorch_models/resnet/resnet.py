@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 ETH Zurich and University of Bologna
+#
+# SPDX-License-Identifier: MIT
+
 """ResNet Models for ONNX Export.
 
 Based on the original ResNet paper:

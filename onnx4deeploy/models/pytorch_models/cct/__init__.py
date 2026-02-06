@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 ETH Zurich and University of Bologna
+#
+# SPDX-License-Identifier: MIT
+
 """CCT (Compact Convolutional Transformer) PyTorch model."""
 
 from .cct import cct_2_3x2_32, cct_4_3x2_32, cct_6_3x2_32, cct_7_3x2_32, cct_test

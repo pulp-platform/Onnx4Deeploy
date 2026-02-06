@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 ETH Zurich and University of Bologna
+#
+# SPDX-License-Identifier: MIT
+
 """Shared utility functions for model tests.
 
 This module provides common validation and testing utilities to reduce

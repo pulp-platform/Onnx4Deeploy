@@ -1,6 +1,6 @@
 # Onnx4Deeploy
 
-[![CI](https://github.com/runwangdl/Onnx4Deeploy/workflows/CI/badge.svg)](https://github.com/runwangdl/Onnx4Deeploy/actions)
+[![CI](https://github.com/pulp-platform/Onnx4Deeploy/workflows/CI/badge.svg)](https://github.com/pulp-platform/Onnx4Deeploy/actions)
 [![Tests](https://img.shields.io/badge/tests-91%20passed-brightgreen)](tests/)
 [![Python](https://img.shields.io/badge/python-3.8%2B-blue)](https://www.python.org/)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
@@ -30,7 +30,6 @@ Onnx4Deeploy provides a unified interface for exporting PyTorch models to ONNX f
 - Node naming and annotation utilities
 
 ### 🧪 Testing Framework
-- 91 comprehensive tests (100% passing)
 - Pytest-based test suite
 - ONNX Runtime validation
 - Baseline comparison testing
@@ -48,7 +47,7 @@ Onnx4Deeploy provides a unified interface for exporting PyTorch models to ONNX f
 ### Install from source
 
 ```bash
-git clone https://github.com/runwangdl/Onnx4Deeploy.git
+git clone https://github.com/pulp-platform/Onnx4Deeploy.git
 cd Onnx4Deeploy
 pip install -e .
 ```
@@ -57,7 +56,6 @@ pip install -e .
 
 ```bash
 python -c "import onnx4deeploy; print(onnx4deeploy.__version__)"
-# Output: 0.2.0
 ```
 
 ---
@@ -121,8 +119,12 @@ isort .
 ---
 
 ## 📄 License
+All licenses used in this repository are listed under the `LICENSES` folder. Unless specified otherwise in the respective file headers, all code checked into this repository is made available under a permissive license.
+- Most software sources and tool scripts are licensed under the [MIT license](https://opensource.org/licenses/mit).
+- Markdown, JSON, text files, pictures, PDFs, are licensed under the [Creative Commons Attribution 4.0 International](https://creativecommons.org/licenses/by/4.0) license (CC BY 4.0).
 
-This project is licensed under the MIT License - see the LICENSE file for details.
+To extract license information for all files, you can use the [reuse tool](https://reuse.software/) and by running `reuse spdx` in the root directory of this repository.
+
 
 ---
 
@@ -136,10 +138,6 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 ## 📞 Contact
 
-- **Issues**: [GitHub Issues](https://github.com/runwangdl/Onnx4Deeploy/issues)
+- **Issues**: [GitHub Issues](https://github.com/pulp-platform/Onnx4Deeploy/issues)
 - **Documentation**: [docs/](docs/)
 - **Progress**: [REFACTORING_STATUS.md](REFACTORING_STATUS.md)
-
----
-
-**Status**: 🚧 v0.2.0 refactoring in progress | ✅ 91/91 tests passing | 🎯 Production-ready core

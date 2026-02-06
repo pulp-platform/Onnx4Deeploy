@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 ETH Zurich and University of Bologna
+#
+# SPDX-License-Identifier: MIT
+
 """ONNX model optimization utilities.
 
 This package provides various optimization functions for ONNX models:

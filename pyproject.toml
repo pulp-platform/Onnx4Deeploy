@@ -1,10 +1,14 @@
+# SPDX-FileCopyrightText: 2025 ETH Zurich and University of Bologna
+#
+# SPDX-License-Identifier: MIT
+
 [build-system]
 requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
 name = "onnx4deeploy"
-version = "0.2.0"
+version = "0.3.0"
 description = "ONNX model generation and optimization framework for deep learning deployment"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -52,8 +56,8 @@ visualization = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/runwangdl/Onnx4Deeploy"
-Repository = "https://github.com/runwangdl/Onnx4Deeploy"
+Homepage = "https://github.com/pulp-platform/Onnx4Deeploy"
+Repository = "https://github.com/pulp-platform/Onnx4Deeploy"
 
 [tool.setuptools.packages.find]
 where = ["."]

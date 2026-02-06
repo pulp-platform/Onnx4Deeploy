@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 ETH Zurich and University of Bologna
+#
+# SPDX-License-Identifier: MIT
+
 """MobileViT Model for ONNX Export.
 
 Based on "MobileViT: Light-weight, General-purpose, and Mobile-friendly Vision Transformer" (ICLR 2022)

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 ETH Zurich and University of Bologna
+#
+# SPDX-License-Identifier: MIT
+
 """
 Pytest configuration and shared fixtures for Onnx4Deeploy tests
 """

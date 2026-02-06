@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 ETH Zurich and University of Bologna
+#
+# SPDX-License-Identifier: MIT
+
 # Core dependencies
 torch>=2.0.0
 onnx>=1.15.0,<1.17.0

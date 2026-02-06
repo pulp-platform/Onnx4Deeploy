@@ -4,14 +4,18 @@ Thank you for your interest in contributing to Onnx4Deeploy! This document provi
 
 ## Table of Contents
 
-- [Code of Conduct](#code-of-conduct)
-- [Getting Started](#getting-started)
-- [Development Setup](#development-setup)
-- [Development Workflow](#development-workflow)
-- [Testing](#testing)
-- [Code Style](#code-style)
-- [Submitting Changes](#submitting-changes)
-- [Reporting Issues](#reporting-issues)
+- [Contributing to Onnx4Deeploy](#contributing-to-onnx4deeploy)
+  - [Table of Contents](#table-of-contents)
+  - [Code of Conduct](#code-of-conduct)
+  - [Getting Started](#getting-started)
+  - [Reporting Issues](#reporting-issues)
+    - [Bug Reports](#bug-reports)
+    - [Feature Requests](#feature-requests)
+    - [Issue Labels](#issue-labels)
+  - [Adding New Operators](#adding-new-operators)
+  - [Adding New Model Exporters](#adding-new-model-exporters)
+  - [Questions?](#questions)
+  - [Thank You!](#thank-you)
 
 ## Code of Conduct
 
@@ -27,7 +31,7 @@ This project adheres to a Code of Conduct. By participating, you are expected to
    ```
 3. **Add upstream remote**:
    ```bash
-   git remote add upstream https://github.com/runwangdl/Onnx4Deeploy.git
+   git remote add upstream https://github.com/pulp-platform/Onnx4Deeploy.git
    ```
 
 ## Reporting Issues
@@ -95,7 +99,7 @@ To add a new model exporter:
 
 ## Questions?
 
-- Open a [GitHub Issue](https://github.com/runwangdl/Onnx4Deeploy/issues)
+- Open a [GitHub Issue](https://github.com/pulp-platform/Onnx4Deeploy/issues)
 - Check existing documentation in `docs/`
 - Review existing code for examples
 

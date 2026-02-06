@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 ETH Zurich and University of Bologna
+#
+# SPDX-License-Identifier: MIT
+
 """Model exporters for Onnx4Deeploy."""
 
 from .cct_exporter import CCTExporter

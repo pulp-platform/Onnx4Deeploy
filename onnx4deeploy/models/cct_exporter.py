@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 ETH Zurich and University of Bologna
+#
+# SPDX-License-Identifier: MIT
+
 """CCT (Compact Convolutional Transformer) Model Exporter."""
 
 from pathlib import Path

@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 ETH Zurich and University of Bologna
+#
+# SPDX-License-Identifier: MIT
+
 """MobileNetV2 Model for ONNX Export.
 
 Based on "MobileNetV2: Inverted Residuals and Linear Bottlenecks" - Sandler et al. (2018)

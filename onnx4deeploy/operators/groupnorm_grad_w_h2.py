@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 ETH Zurich and University of Bologna
+#
+# SPDX-License-Identifier: MIT
+
 """GroupNormGradWH2 operator test implementation (for H=2 cases)."""
 
 from typing import Any, Dict

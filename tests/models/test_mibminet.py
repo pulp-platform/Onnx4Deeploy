@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 ETH Zurich and University of Bologna
+#
+# SPDX-License-Identifier: MIT
+
 """
 Tests for MI-BMInet (Motor Imagery BMI Network) model export.
 

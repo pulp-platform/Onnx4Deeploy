@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 ETH Zurich and University of Bologna
+#
+# SPDX-License-Identifier: MIT
+
 # Pre-commit hooks for Onnx4Deeploy
 # Install: pip install pre-commit
 # Setup: pre-commit install
@@ -60,15 +64,6 @@ repos:
     - flake8-docstrings
     - flake8-bugbear
 
-  # Security checks
-- repo: https://github.com/PyCQA/bandit
-  rev: 1.7.6
-  hooks:
-  - id: bandit
-    args: [-c, pyproject.toml, --severity-level, medium]
-    additional_dependencies: ['bandit[toml]']
-    exclude: ^tests/
-
   # Check for common Python issues
 - repo: https://github.com/pre-commit/pygrep-hooks
   rev: v1.10.0
@@ -86,6 +81,17 @@ repos:
   - id: pretty-format-yaml
     args: [--autofix, --indent, '2']
     exclude: ^\.github/workflows/
+
+- repo: local
+  hooks:
+  - id: reuse
+    name: Check SPDX License Headers
+    entry: scripts/reuse_skip_wrapper.py
+    additional_dependencies: [reuse==6.2.0]
+    language: python
+    stages: [pre-commit, pre-merge-commit, pre-push, manual]
+    types: [text]
+    exclude_types: [batch, svg, json, markdown]
 
 # CI-specific configuration
 ci:

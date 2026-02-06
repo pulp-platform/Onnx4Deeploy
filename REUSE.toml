@@ -1,0 +1,14 @@
+# SPDX-FileCopyrightText: 2025 ETH Zurich and University of Bologna
+# SPDX-License-Identifier: MIT
+
+version = 1
+
+[[annotations]]
+path = "**/*.md"
+SPDX-FileCopyrightText = "2025 ETH Zurich and University of Bologna"
+SPDX-License-Identifier = "CC-BY-ND-4.0"
+
+[[annotations]]
+path = "**/*.json"
+SPDX-FileCopyrightText = "2025 ETH Zurich and University of Bologna"
+SPDX-License-Identifier = "CC-BY-ND-4.0"

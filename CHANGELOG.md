@@ -7,13 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+
+## [0.2.1] - 06.02.2026
+### Changed
+- Transferred repo to `pulp-platform` organization
+- Use `pre-commit` for linting and code formatting in CI
+
+
 ### Added
 - Pre-commit hooks configuration for code quality automation
 - Comprehensive contributing guide (CONTRIBUTING.md)
 - Security policy (SECURITY.md)
 - Code of conduct (CODE_OF_CONDUCT.md)
+- Use `reuse` for license management and compliance
+- Added proper license headers to all source files
+-
+### Changed
+-
 
-## [0.2.0] - 2026
+### Fixed
+-
+
+## [0.2.0] - 06.02.2026
 
 ### Added
 - Unified CLI tool (`Onnx4Deeploy.py`) for operator and model generation
@@ -39,7 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Improved ONNX graph optimization passes
 - Enhanced gradient node handling
 
-## [0.1.0] - 2025
+## [0.1.0] - 25.10.2025
 
 ### Added
 - Initial release
@@ -58,6 +73,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Fixed**: Bug fixes
 - **Security**: Security vulnerability fixes
 
-[Unreleased]: https://github.com/runwangdl/Onnx4Deeploy/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/runwangdl/Onnx4Deeploy/releases/tag/v0.2.0
-[0.1.0]: https://github.com/runwangdl/Onnx4Deeploy/releases/tag/v0.1.0
+[Unreleased]: https://github.com/pulp-platform/Onnx4Deeploy/compare/v0.2.1...HEAD
+[0.2.1]: https://github.com/pulp-platform/Onnx4Deeploy/releases/tag/v0.2.1
+[0.2.0]: https://github.com/pulp-platform/Onnx4Deeploy/releases/tag/v0.2.0
+[0.1.0]: https://github.com/pulp-platform/Onnx4Deeploy/releases/tag/v0.1.0

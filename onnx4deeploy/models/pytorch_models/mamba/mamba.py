@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 ETH Zurich and University of Bologna
+#
+# SPDX-License-Identifier: MIT
+
 """Mamba implementation with high-level ONNX operators.
 
 This version exports to ONNX with clean, high-level operators:

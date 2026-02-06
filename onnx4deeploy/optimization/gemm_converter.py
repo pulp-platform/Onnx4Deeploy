@@ -1,3 +1,7 @@
+# SPDX-FileCopyrightText: 2025 ETH Zurich and University of Bologna
+#
+# SPDX-License-Identifier: MIT
+
 """GEMM (General Matrix Multiplication) conversion and optimization utilities.
 
 This module provides functions to convert and optimize GEMM operations in ONNX models:
