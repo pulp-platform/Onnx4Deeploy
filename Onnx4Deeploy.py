@@ -295,9 +295,12 @@ def generate_model(model_name: str, mode: str, output_path: Optional[str] = None
         elif mode == "train":
             onnx_file = exporter.export_training()
             mode_desc = "Training mode"
+        elif mode == "zo-train":
+            onnx_file = exporter.export_zo_training()
+            mode_desc = "Zeroth-order Training mode"
         else:
             print(f"❌ Unknown mode: {mode}")
-            print("   Available modes: infer, train")
+            print("   Available modes: infer, train, zo-train")
             sys.exit(1)
 
         print(f"\n{'='*70}")
@@ -311,7 +314,9 @@ def generate_model(model_name: str, mode: str, output_path: Optional[str] = None
         files_to_check = ["network.onnx", "inputs.npz", "outputs.npz"]
         if mode == "train":
             files_to_check.extend(["network_train.onnx", "optimizer_model.onnx"])
-
+        elif mode == "zo-train":
+            files_to_check.append("network_zo.onnx")
+        
         for file in files_to_check:
             file_path = output_dir / file
             if file_path.exists():
@@ -406,9 +411,9 @@ Examples:
         "-mode",
         "--mode",
         type=str,
-        choices=["infer", "train"],
+        choices=["infer", "train", "zo-train"],
         default="infer",
-        help="Model export mode: infer (inference) or train (training) [default: infer]",
+        help="Model export mode: infer (inference), train (BP training), or zo-train (zeroth-order training) [default: infer]",
     )
 
     # Output path
