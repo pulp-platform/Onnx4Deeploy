@@ -78,6 +78,12 @@ class SleepConViTExporter(BaseONNXExporter):
             # Training configuration
             "training_strategy": "full",  # Options: "full", "last_layer", "custom"
             "custom_trainable_params": [],
+            # ZO training configuration
+            "zo": {
+                "epsilon": 0.1,
+                "seed": 42,
+                "noise_type": "uniform",
+            }
         }
 
         self.model_config = config
