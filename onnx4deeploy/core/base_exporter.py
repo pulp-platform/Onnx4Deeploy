@@ -26,6 +26,7 @@ from onnx import helper
 from onnxruntime.training import artifacts
 
 from .onnx_utils import print_model_info, randomize_onnx_initializers
+from onnx4deeploy.transform.zo_transform import generate_zo_graph
 
 
 class ExportMode(Enum):
@@ -33,6 +34,7 @@ class ExportMode(Enum):
 
     TRAINING = "train"
     INFERENCE = "infer"
+    ZO_TRAINING = "zo-train"
 
 
 class BaseONNXExporter(ABC):
@@ -247,6 +249,14 @@ class BaseONNXExporter(ABC):
                     "network_train": os.path.join(output_dir, "network_train.onnx"),
                     "network_train_optim": os.path.join(output_dir, "network_train_optim.onnx"),
                     "network_pre_sgd": os.path.join(output_dir, "network_pre_sgd.onnx"),
+                }
+            )
+            
+        if mode == ExportMode.ZO_TRAINING:
+            paths.update(
+                {
+                    "network_infer": os.path.join(output_dir, "network_infer.onnx"),
+                    "network_zo_train": os.path.join(output_dir, "network_zo_train.onnx"),
                 }
             )
 
@@ -484,6 +494,114 @@ class BaseONNXExporter(ABC):
         print(f"{'='*60}\n")
 
         return self.paths["network"]
+    
+    def export_zo_training(self, save_path: Optional[str] = None) -> str:
+        """
+        Export model in zeroth-order training mode.
+
+        Args:
+            save_path: Optional custom save path"""
+        if save_path:
+            self.save_path = save_path
+
+        # Load configuration
+        self.config = self.load_config()
+        self.paths = self.setup_paths(ExportMode.ZO_TRAINING)
+
+        print(f"\n{'='*60}")
+        print(f"🚀 Exporting {self.get_model_name()} to ONNX (Zeroth-Order Training Mode)")
+        print(f"{'='*60}\n")
+
+        # Create PyTorch model
+        print("📦 Creating PyTorch model...")
+        model = self.create_model()
+        model.eval()  # Zeroth-Order Training mode
+
+        # Store model for test data generation
+        self._model = model
+
+        # Generate input
+        input_shape = self.get_input_shape()
+        input_tensor = torch.randn(*input_shape, dtype=torch.float32)
+        print(f"   Input shape: {input_shape}")
+
+        # Export to ONNX
+        print("\n📤 Exporting to ONNX...")
+        opset_version = self.config.get("opset_version", 12)
+        onnx_model = self._export_to_onnx(model, input_tensor, opset_version)
+
+        # Randomize initializers for testing
+        onnx_model = randomize_onnx_initializers(onnx_model)
+
+        # Save inference model
+        onnx.save(onnx_model, self.paths["network_infer"])
+        print(f"✅ Inference ONNX saved: {self.paths['network_infer']}")
+
+        # Run inference optimizations
+        print("\n🔧 Running inference optimizations...")
+        self.run_inference_optimization(self.paths["network_infer"], self.paths["network_infer"])
+
+        # Reload optimized model
+        onnx_model = onnx.load(self.paths["network_infer"])
+        print_model_info(self.paths["network_infer"])
+
+        # Get trainable parameters
+        all_param_names = [init.name for init in onnx_model.graph.initializer]
+        requires_grad = self.get_trainable_params(all_param_names)
+        frozen_params = [name for name in all_param_names if name not in requires_grad]
+
+        print(f"\n🔹 Trainable parameters: {len(requires_grad)}")
+        print(f"🔹 Frozen parameters: {len(frozen_params)}")
+
+        # Transform model for zeroth-order training (e.g., add noise nodes, modify outputs)
+        print("\n🔧 Transforming model for zeroth-order training...")
+        generate_zo_graph(
+            inference_onnx=self.paths["network_infer"],
+            output_onnx=self.paths["network_zo_train"],
+            zo_config=self.config["zo"],
+        )
+
+        # # Load training model and add gradient outputs
+        # onnx_model = onnx.load(self.paths["network_train"])
+        # graph = onnx_model.graph
+        # grad_tensor_names = [name + "_grad" for name in requires_grad]
+
+        # for grad_name in grad_tensor_names:
+        #     if not any(output.name == grad_name for output in graph.output):
+        #         grad_output = helper.make_tensor_value_info(grad_name, onnx.TensorProto.FLOAT, None)
+        #         graph.output.append(grad_output)
+
+        # # Save with gradient outputs
+        # onnx.save(onnx_model, self.paths["network_train_optim"])
+        # onnx.save(onnx_model, self.paths["network_train"])
+
+        # Run shape inference for training model (handles Microsoft custom ops)
+        print("\n🔍 Running shape inference...")
+        from ..optimization.shape_optimizer import infer_shapes_with_custom_ops
+        infer_shapes_with_custom_ops(
+            self.paths["network_zo_train"]
+        )
+
+        # # Run training-specific optimizations
+        # print("\n🔧 Running training optimizations...")
+        # self.run_training_optimization(self.paths["network_train_optim"], self.paths["network"])
+
+        # # Save pre-SGD model
+        # shutil.copy(self.paths["network"], self.paths["network_pre_sgd"])
+        # print(f"✅ Pre-SGD model saved: {self.paths['network_pre_sgd']}")
+
+        # Create test input/output
+        print("\n🧪 Creating test input/output...")
+        self._create_test_data()
+
+        # # Add optimizer (SGD) nodes
+        # print("\n➕ Adding SGD optimizer nodes...")
+        # self._add_optimizer_nodes()
+
+        print(f"\n{'='*60}")
+        print("✅ Export Complete!")
+        print(f"   Final model: {self.paths['network']}")
+        print(f"{'='*60}\n")
 
     def _create_test_data(self):
         """
@@ -546,5 +664,7 @@ class BaseONNXExporter(ABC):
             return self.export_training(save_path)
         elif mode == "infer":
             return self.export_inference(save_path)
+        elif mode == "zo-train":
+            return self.export_zo_training(save_path)
         else:
             raise ValueError(f"Invalid mode: {mode}. Must be 'train' or 'infer'")

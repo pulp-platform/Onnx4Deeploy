@@ -10,5 +10,5 @@ from .model_io import compare_onnx_models
 __all__ = [
     "load_config",
     "load_train_config",
-    "compare_onnx_models",
+    "compare_onnx_models"
 ]

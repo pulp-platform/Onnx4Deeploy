@@ -37,6 +37,11 @@ from .softmax_cross_entropy_grad import SoftmaxCrossEntropyGradOperatorTest
 from .softmax_grad import SoftmaxGradOperatorTest
 from .split import SplitOperatorTest
 from .transpose import TransposeOperatorTest
+from .perturbnormal import PerturbNormalOperatorTest
+from .perturbeggroll import PerturbEggrollOperatorTest
+from .perturbrademacher import PerturbRademacherOperatorTest
+from .perturbuniform import PerturbUniformOperatorTest
+from .perturbtriangle import PerturbTriangleOperatorTest
 
 __all__ = [
     "BaseOperatorTest",
@@ -69,4 +74,9 @@ __all__ = [
     "ConvGradXOperatorTest",
     "ConvGradWOperatorTest",
     "ConvGradBOperatorTest",
+    "PerturbNormalOperatorTest",
+    "PerturbEggrollOperatorTest",
+    "PerturbRademacherOperatorTest",
+    "PerturbUniformOperatorTest",
+    "PerturbTriangleOperatorTest"
 ]
