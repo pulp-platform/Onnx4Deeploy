@@ -1,0 +1,14 @@
+perturbnormal:
+  input_shape: [128, 48]
+
+perturbuniform:
+  input_shape: [128, 48]
+
+perturbtriangle:
+  input_shape: [128, 48]
+
+perturbrademacher:
+  input_shape: [128, 48]
+
+perturbeggroll:
+  input_shape: [128, 48]

@@ -169,10 +169,18 @@ def list_available_operators():
         "ConvGradX": "Convolution input gradient",
         "ConvGradW": "Convolution weight gradient",
         "ConvGradB": "Convolution bias gradient",
+        # ZO
+        "PerturbNormal": "Perturb input with gaussian random noise",
+        "PerturbUniform": "Perturb input with uniform random noise",
+        "PerturbTriangle": "Perturb input with triangle random noise",
+        "PerturbRademacher": "Perturb input with Rademacher random noise",
+        "PerturbEggroll": "Perturb input with Eggroll random noise",
+        
         # Others
         "ReduceSum": "Sum reduction",
         "SoftmaxCrossEntropy": "Softmax cross entropy",
         "ReluGrad": "ReLU gradient",
+        
     }
     return operators
 
