@@ -183,19 +183,19 @@ class ConvStem(nn.Module):
             nn.Conv2d(
                 in_channels=in_channels,
                 out_channels=branch_out_channels,
-                kernel_size=(kernel_sizes[1],1),
-                stride=(stride, 1),
-                padding=(kernel_sizes[1] // 2, 0),
+                kernel_size=(1, kernel_sizes[1]),
+                stride=(1, stride),
+                padding=(0, kernel_sizes[1] // 2),
                 bias=False
             ),
             nn.ReLU(inplace=True),
-            nn.MaxPool2d(kernel_size=(pool_kernel, 1), stride=(pool_kernel, 1)),
+            nn.MaxPool2d(kernel_size=(1, pool_kernel), stride=(1, pool_kernel)),
             nn.Conv2d(
                 in_channels=branch_out_channels,
                 out_channels=branch_out_channels,
-                kernel_size=(3,1),
-                stride=(2, 1),
-                padding=(1,0),
+                kernel_size=(1, 3),
+                stride=(1, 2),
+                padding=(0, 1),
                 bias=False
             ),
             nn.ReLU(inplace=True)
