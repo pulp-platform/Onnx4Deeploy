@@ -177,9 +177,32 @@ class ConvStem(nn.Module):
             ),
             nn.ReLU(inplace=False),
         )
-
-        # Branch 2: Kernel size 100 (coarse-grained features)
+        
+        # Branch 2: Kernel size 200 (middle-grained features)
         self.branch2 = nn.Sequential(
+            nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=branch_out_channels,
+                kernel_size=(kernel_sizes[1],1),
+                stride=(stride, 1),
+                padding=(kernel_sizes[1] // 2, 0),
+                bias=False
+            ),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(pool_kernel, 1), stride=(pool_kernel, 1)),
+            nn.Conv2d(
+                in_channels=branch_out_channels,
+                out_channels=branch_out_channels,
+                kernel_size=(3,1),
+                stride=(2, 1),
+                padding=(1,0),
+                bias=False
+            ),
+            nn.ReLU(inplace=True)
+        )
+
+        # Branch 3: Kernel size 100 (coarse-grained features)
+        self.branch3 = nn.Sequential(
             nn.Conv2d(
                 in_channels=in_channels,
                 out_channels=branch_out_channels,
@@ -214,9 +237,11 @@ class ConvStem(nn.Module):
         """
         x1 = self.branch1(x)
         x2 = self.branch2(x)
+        x3 = self.branch3(x)
         # Single concatenation (Deeploy compatible)
-        x = torch.cat((x1, x2), dim=1)
-        return x
+        x12 = torch.cat((x1, x2), dim=1)
+        x123 = torch.cat((x12, x3), dim=1)
+        return x123
 
 
 class Encoder(nn.Module):
