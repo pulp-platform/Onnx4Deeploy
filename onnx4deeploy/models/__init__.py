@@ -14,6 +14,7 @@ from .mobilevit_exporter import MobileViTExporter
 from .resnet_exporter import ResNetExporter
 from .simple_mlp_exporter import SimpleMlpExporter
 from .sleep_convit_exporter import SleepConViTExporter
+from .tinyvit_exporter import TinyViTExporter
 
 __all__ = [
     "CCTExporter",
@@ -26,4 +27,5 @@ __all__ = [
     "MobileViTExporter",
     "MambaExporter",
     "SleepConViTExporter",
+    "TinyViTExporter",
 ]

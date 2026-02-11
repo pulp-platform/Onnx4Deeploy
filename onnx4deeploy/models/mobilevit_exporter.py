@@ -62,14 +62,28 @@ class MobileViTExporter(BaseONNXExporter):
         """
         variant = self.model_config.get("variant", "mobile_vit_xs")
         num_classes = self.model_config["num_classes"]
+        batch_size = self.model_config["batch_size"]
+        img_size = self.model_config["img_size"]
 
-        # Select model variant
+        # Select model variant with fixed dimensions
         if variant == "mobile_vit_xxs":
-            model = mobile_vit_xxs(num_classes=num_classes)
+            model = mobile_vit_xxs(
+                batch_size=batch_size,
+                image_size=(img_size, img_size),
+                num_classes=num_classes,
+            )
         elif variant == "mobile_vit_xs":
-            model = mobile_vit_xs(num_classes=num_classes)
+            model = mobile_vit_xs(
+                batch_size=batch_size,
+                image_size=(img_size, img_size),
+                num_classes=num_classes,
+            )
         elif variant == "mobile_vit_s":
-            model = mobile_vit_s(num_classes=num_classes)
+            model = mobile_vit_s(
+                batch_size=batch_size,
+                image_size=(img_size, img_size),
+                num_classes=num_classes,
+            )
         else:
             raise ValueError(
                 f"Unknown MobileViT variant: {variant}. "

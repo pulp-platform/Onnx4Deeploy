@@ -40,9 +40,9 @@ class TinyViTExporter(BaseONNXExporter):
         # Default TinyViT configuration
         config = {
             "batch_size": 1,
-            "img_size": 224,  # Standard ImageNet size
+            "img_size": 64,  # Reduced for Deeploy memory constraints
             "input_channels": 3,  # RGB
-            "num_classes": 1000,  # ImageNet classes
+            "num_classes": 10,  # Reduced for testing
             "opset_version": 17,  # LayerNorm requires opset 17+
             "variant": "tiny_vit_5m",  # Options: "tiny_vit_5m", "tiny_vit_11m", "tiny_vit_21m"
             # Training configuration
@@ -63,14 +63,15 @@ class TinyViTExporter(BaseONNXExporter):
         variant = self.model_config.get("variant", "tiny_vit_5m")
         num_classes = self.model_config["num_classes"]
         img_size = self.model_config["img_size"]
+        batch_size = self.model_config["batch_size"]
 
         # Select model variant
         if variant == "tiny_vit_5m":
-            model = tiny_vit_5m(num_classes=num_classes, img_size=img_size)
+            model = tiny_vit_5m(num_classes=num_classes, img_size=img_size, batch_size=batch_size)
         elif variant == "tiny_vit_11m":
-            model = tiny_vit_11m(num_classes=num_classes, img_size=img_size)
+            model = tiny_vit_11m(num_classes=num_classes, img_size=img_size, batch_size=batch_size)
         elif variant == "tiny_vit_21m":
-            model = tiny_vit_21m(num_classes=num_classes, img_size=img_size)
+            model = tiny_vit_21m(num_classes=num_classes, img_size=img_size, batch_size=batch_size)
         else:
             raise ValueError(
                 f"Unknown TinyViT variant: {variant}. "

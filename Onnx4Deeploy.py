@@ -41,6 +41,7 @@ def list_available_models():
         ResNetExporter,
         SimpleMlpExporter,
         SleepConViTExporter,
+        TinyViTExporter,
     )
 
     models = {
@@ -100,6 +101,27 @@ def list_available_models():
             "description": "Compact Convolutional Transformer (Vision)",
             "input_shape": "(B, 3, 32, 32)",
             "classes": 10,
+        },
+        "TinyViT-5M": {
+            "class": TinyViTExporter,
+            "description": "TinyViT-5M (Compact Vision Transformer, ~5M params)",
+            "input_shape": "(B, 3, 64, 64)",
+            "classes": 10,
+            "config": {"variant": "tiny_vit_5m", "img_size": 64, "num_classes": 10},
+        },
+        "TinyViT-11M": {
+            "class": TinyViTExporter,
+            "description": "TinyViT-11M (Compact Vision Transformer, ~11M params)",
+            "input_shape": "(B, 3, 64, 64)",
+            "classes": 10,
+            "config": {"variant": "tiny_vit_11m", "img_size": 64, "num_classes": 10},
+        },
+        "TinyViT-21M": {
+            "class": TinyViTExporter,
+            "description": "TinyViT-21M (Compact Vision Transformer, ~21M params)",
+            "input_shape": "(B, 3, 64, 64)",
+            "classes": 10,
+            "config": {"variant": "tiny_vit_21m", "img_size": 64, "num_classes": 10},
         },
         "Mamba": {
             "class": MambaExporter,
@@ -348,6 +370,7 @@ def print_usage_examples():
     print("")
     print("  # Hybrid and Transformer models")
     print("  python Onnx4Deeploy.py -model MobileViT-XS -mode infer -o ./output/mobilevit")
+    print("  python Onnx4Deeploy.py -model TinyViT-5M -mode infer -o ./output/tinyvit_5m")
     print("  python Onnx4Deeploy.py -model CCT -mode infer -o ./output/cct_infer")
     print("  python Onnx4Deeploy.py -model CCT -mode train -o ./output/cct_train")
     print("  python Onnx4Deeploy.py -model Mamba -mode infer -o ./output/mamba")
@@ -398,7 +421,7 @@ Examples:
         "--model",
         type=str,
         metavar="NAME",
-        help="Generate model ONNX (e.g.: ResNet18, ResNet50, MobileNetV2, MobileViT-XS, CCT, Mamba, MIBMInet)",
+        help="Generate model ONNX (e.g.: ResNet18, ResNet50, MobileNetV2, MobileViT-XS, TinyViT-5M, CCT, Mamba, MIBMInet)",
     )
 
     # Model mode parameters
