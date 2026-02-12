@@ -31,6 +31,17 @@ import torch.nn as nn
 import torch.nn.init as init
 
 
+class SiLU(nn.Module):
+    """SiLU activation that exports cleanly to ONNX.
+
+    Uses torch.nn.functional.silu which has built-in ONNX support
+    with proper shape inference.
+    """
+
+    def forward(self, x):
+        return torch.nn.functional.silu(x)
+
+
 class ConvBNAct(nn.Module):
     """Convolution + BatchNorm + Activation (Deploy Version).
 
@@ -70,7 +81,7 @@ class ConvBNAct(nn.Module):
             bias=False,
         )
         self.bn = nn.BatchNorm2d(out_channels)
-        self.act = nn.SiLU(inplace=False)  # inplace=False for ONNX compatibility
+        self.act = SiLU()  # Separate ONNX node
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -273,7 +284,7 @@ class TransformerBlock(nn.Module):
 
         self.mlp = nn.Sequential(
             nn.Linear(dim, self.mlp_hidden_dim),
-            nn.SiLU(inplace=False),  # inplace=False for ONNX
+            SiLU(),  # Separate ONNX node
             nn.Linear(self.mlp_hidden_dim, dim),
         )
 
@@ -299,112 +310,112 @@ class TransformerBlock(nn.Module):
 
 
 class MobileViTBlock(nn.Module):
-    """MobileViT block: Local (Conv) + Global (Transformer) representations (Deploy Version).
+    """MobileViT block (Static deploy version, ONNX-friendly).
 
-    Architecture:
-        Input [B, in_channels, H, W]
-        → Local Rep: Conv3x3 + Conv1x1 [B, transformer_dim, H, W]
-        → Unfold to patches [B, H*W, transformer_dim]
-        → Transformer blocks [B, H*W, transformer_dim]
-        → Fold back [B, transformer_dim, H, W]
-        → Fusion: Conv1x1 [B, in_channels, H, W]
-        → Residual connection + Input [B, in_channels, H, W]
-
-    CRITICAL: All dimensions (B, H, W, num_patches) are fixed at initialization.
-    No dynamic shape operations allowed.
+    Key properties:
+    - FIXED B/H/W at init (no x.shape, no dynamic reshape)
+    - TRUE patching with fixed patch_size (ph, pw)
+    - Transformer is applied on tokens within each patch:
+        effective_batch = B * (H/ph) * (W/pw)
+        seq_len        = ph * pw
+        dim            = transformer_dim
+    - Fusion follows MobileViT definition:
+        proj (1x1) -> concat(input, proj) -> 3x3 conv fusion
     """
 
     def __init__(
         self,
         in_channels: int,
         transformer_dim: int,
+        feat_h: int,
+        feat_w: int,
+        patch_size: Tuple[int, int] = (2, 2),  # fixed patch size (ph, pw)
         num_heads: int = 4,
         num_transformer_blocks: int = 2,
-        patch_h: int = 8,  # Fixed patch height
-        patch_w: int = 8,  # Fixed patch width
-        batch_size: int = 1,  # Fixed batch size for ONNX
+        batch_size: int = 1,  # fixed batch size for ONNX
     ):
-        """
-        Initialize MobileViT block with FIXED dimensions.
-
-        Args:
-            in_channels: Number of input channels
-            transformer_dim: Transformer dimension
-            num_heads: Number of attention heads
-            num_transformer_blocks: Number of transformer blocks
-            patch_h: Fixed spatial height after local_rep
-            patch_w: Fixed spatial width after local_rep
-            batch_size: Fixed batch size for ONNX export
-        """
         super().__init__()
         self.in_channels = in_channels
         self.transformer_dim = transformer_dim
-        self.num_heads = num_heads
-        self.batch_size = batch_size
 
-        # FIXED dimensions - computed at init, never at runtime
-        self.patch_h = patch_h
-        self.patch_w = patch_w
-        self.num_patches = patch_h * patch_w  # Fixed number of patches
+        # Fixed dimensions (must be divisible)
+        self.B = batch_size
+        self.H = feat_h
+        self.W = feat_w
+        self.ph, self.pw = patch_size
+        assert (
+            self.H % self.ph == 0 and self.W % self.pw == 0
+        ), "feat_h/feat_w must be divisible by patch_size"
 
-        # Local representation: Conv3x3 + Conv1x1
+        self.nh = self.H // self.ph
+        self.nw = self.W // self.pw
+        self.num_patches = self.nh * self.nw  # fixed
+        self.patch_area = self.ph * self.pw  # fixed
+
+        # Transformer will run on:
+        # x: [B*num_patches, patch_area, transformer_dim]
+        self.tr_B = self.B * self.num_patches  # fixed
+        self.tr_T = self.patch_area  # fixed
+
+        # Local representation
         self.local_rep = nn.Sequential(
             ConvBNAct(in_channels, in_channels, kernel_size=3),
             ConvBNAct(in_channels, transformer_dim, kernel_size=1),
         )
 
-        # Global representation: Transformer blocks with FIXED dimensions
+        # Global representation (transformer)
         self.global_rep = nn.Sequential(
             *[
                 TransformerBlock(
-                    transformer_dim,
+                    dim=transformer_dim,
                     num_heads=num_heads,
-                    batch_size=batch_size,
-                    seq_len=self.num_patches,
+                    mlp_ratio=2.0,
+                    batch_size=self.tr_B,
+                    seq_len=self.tr_T,
                 )
                 for _ in range(num_transformer_blocks)
             ]
         )
 
-        # Fusion: Conv1x1 to project back
-        self.fusion = ConvBNAct(transformer_dim, in_channels, kernel_size=1)
+        # Project back + fusion (MobileViT definition)
+        self.proj = ConvBNAct(transformer_dim, in_channels, kernel_size=1)
+        self.fusion = ConvBNAct(in_channels * 2, in_channels, kernel_size=3)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        Forward pass with FIXED reshaping dimensions.
+        # x: [B, C_in, H, W] where B/H/W are fixed constants
+        shortcut = x
 
-        Args:
-            x: Input tensor [B, in_channels, patch_h, patch_w]
+        # Local rep: [B, D, H, W]
+        y = self.local_rep(x)
 
-        Returns:
-            Output tensor [B, in_channels, patch_h, patch_w]
-        """
-        shortcut = x  # Save for residual connection
+        # --- Unfold into patches (STATIC) ---
+        # y: [B, D, H, W]
+        # -> [B, D, nh, ph, nw, pw]
+        y = y.reshape(self.B, self.transformer_dim, self.nh, self.ph, self.nw, self.pw)
+        # -> [B, nh, nw, ph, pw, D]
+        y = y.permute(0, 2, 4, 3, 5, 1)
+        # -> [B*nh*nw, ph*pw, D]
+        y = y.reshape(self.tr_B, self.tr_T, self.transformer_dim)
 
-        # Local representation
-        y = self.local_rep(x)  # [B, transformer_dim, patch_h, patch_w]
+        # Transformer: [B*nh*nw, ph*pw, D]
+        y = self.global_rep(y)
 
-        # Unfold patches for transformer (FIXED dimensions only!)
-        # Use reshape with FIXED batch_size instead of -1 for ONNX
-        y = y.reshape(
-            self.batch_size, self.transformer_dim, self.num_patches
-        )  # [B, transformer_dim, H*W]
-        y = y.transpose(1, 2)  # [B, num_patches, transformer_dim]
+        # --- Fold back (STATIC) ---
+        # -> [B, nh, nw, ph, pw, D]
+        y = y.reshape(self.B, self.nh, self.nw, self.ph, self.pw, self.transformer_dim)
+        # -> [B, D, nh, ph, nw, pw]
+        y = y.permute(0, 5, 1, 3, 2, 4)
+        # -> [B, D, H, W]
+        y = y.reshape(self.B, self.transformer_dim, self.H, self.W)
 
-        # Global representation (Transformer)
-        y = self.global_rep(y)  # [B, num_patches, transformer_dim]
+        # Project back: [B, C_in, H, W]
+        y = self.proj(y)
 
-        # Fold back to spatial (FIXED dimensions!)
-        y = y.transpose(1, 2)  # [B, transformer_dim, num_patches]
-        y = y.reshape(
-            self.batch_size, self.transformer_dim, self.patch_h, self.patch_w
-        )  # [B, transformer_dim, H, W]
+        # Fusion: concat + 3x3 conv (MobileViT definition)
+        y = torch.cat([shortcut, y], dim=1)  # [B, 2*C_in, H, W]
+        y = self.fusion(y)  # [B, C_in, H, W]
 
-        # Fusion
-        y = self.fusion(y)  # [B, in_channels, patch_h, patch_w]
-
-        # Residual connection
-        return shortcut + y
+        return y
 
 
 class MobileViT(nn.Module):
@@ -501,39 +512,42 @@ class MobileViT(nn.Module):
         self.mv2_4 = InvertedResidual(channels[3], channels[4], stride=2)
 
         # Stage 2: MobileViT block 1
-        patch_h_1, patch_w_1 = self.mvit_patch_dims[0]
+        feat_h_1, feat_w_1 = self.mvit_patch_dims[0]
         self.mvit1 = MobileViTBlock(
             channels[4],
             dims[0],
+            feat_h=feat_h_1,
+            feat_w=feat_w_1,
+            patch_size=(2, 2),
             num_heads=4,
-            patch_h=patch_h_1,
-            patch_w=patch_w_1,
             batch_size=batch_size,
         )
         self.mv2_5 = InvertedResidual(channels[4], channels[5], stride=1)
 
         # Stage 3: MobileViT block 2
         self.mv2_6 = InvertedResidual(channels[5], channels[6], stride=2)
-        patch_h_2, patch_w_2 = self.mvit_patch_dims[1]
+        feat_h_2, feat_w_2 = self.mvit_patch_dims[1]
         self.mvit2 = MobileViTBlock(
             channels[6],
             dims[1],
+            feat_h=feat_h_2,
+            feat_w=feat_w_2,
+            patch_size=(2, 2),
             num_heads=4,
-            patch_h=patch_h_2,
-            patch_w=patch_w_2,
             batch_size=batch_size,
         )
         self.mv2_7 = InvertedResidual(channels[6], channels[7], stride=1)
 
         # Stage 4: MobileViT block 3
         self.mv2_8 = InvertedResidual(channels[7], channels[8], stride=2)
-        patch_h_3, patch_w_3 = self.mvit_patch_dims[2]
+        feat_h_3, feat_w_3 = self.mvit_patch_dims[2]
         self.mvit3 = MobileViTBlock(
             channels[8],
             dims[2],
+            feat_h=feat_h_3,
+            feat_w=feat_w_3,
+            patch_size=(2, 2),
             num_heads=4,
-            patch_h=patch_h_3,
-            patch_w=patch_w_3,
             batch_size=batch_size,
         )
         self.conv2 = ConvBNAct(channels[8], channels[9], kernel_size=1)
