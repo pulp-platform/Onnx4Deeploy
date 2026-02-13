@@ -83,7 +83,7 @@ class SleepConViTExporter(BaseONNXExporter):
                 "epsilon": 0.1,
                 "seed": 42,
                 "noise_type": "uniform",
-            }
+            },
         }
 
         self.model_config = config

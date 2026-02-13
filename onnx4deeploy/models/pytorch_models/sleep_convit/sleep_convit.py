@@ -177,7 +177,7 @@ class ConvStem(nn.Module):
             ),
             nn.ReLU(inplace=False),
         )
-        
+
         # Branch 2: Kernel size 200 (middle-grained features)
         self.branch2 = nn.Sequential(
             nn.Conv2d(
@@ -186,7 +186,7 @@ class ConvStem(nn.Module):
                 kernel_size=(1, kernel_sizes[1]),
                 stride=(1, stride),
                 padding=(0, kernel_sizes[1] // 2),
-                bias=False
+                bias=False,
             ),
             nn.ReLU(inplace=True),
             nn.MaxPool2d(kernel_size=(1, pool_kernel), stride=(1, pool_kernel)),
@@ -196,9 +196,9 @@ class ConvStem(nn.Module):
                 kernel_size=(1, 3),
                 stride=(1, 2),
                 padding=(0, 1),
-                bias=False
+                bias=False,
             ),
-            nn.ReLU(inplace=True)
+            nn.ReLU(inplace=True),
         )
 
         # Branch 3: Kernel size 100 (coarse-grained features)
@@ -241,7 +241,7 @@ class ConvStem(nn.Module):
         # Single concatenation (Deeploy compatible)
         x12 = torch.cat((x1, x2), dim=1)
         x123 = torch.cat((x12, x3), dim=1)
-        print(F"ConvStem output shape: {x123.shape}")  # Debug print to verify output shape
+        print(f"ConvStem output shape: {x123.shape}")  # Debug print to verify output shape
         return x123
 
 
