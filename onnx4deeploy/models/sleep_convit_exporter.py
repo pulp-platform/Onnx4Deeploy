@@ -67,17 +67,23 @@ class SleepConViTExporter(BaseONNXExporter):
             "input_channels": 1,
             "input_length": 3000,  # Time-series sequence length
             "model_dim": 48,
-            "num_heads": 8,
+            "num_heads": 6,
             "num_patches": 94,  # Computed from ConvStem output
             "seq_len": 95,  # num_patches + 1 (CLS token)
             "attention_dropout": 0.0,  # No dropout for inference
-            "mlp_head_hidden_dim": 192,
+            "mlp_head_hidden_dim": 48,
             "encoder_ff_dropout": 0.0,  # No dropout for inference
             "num_classes": 5,  # Sleep stages: Wake, N1, N2, N3, REM
             "opset_version": 17,  # Match CCT opset version for compatibility
             # Training configuration
             "training_strategy": "full",  # Options: "full", "last_layer", "custom"
             "custom_trainable_params": [],
+            # ZO training configuration
+            "zo": {
+                "epsilon": 0.1,
+                "seed": 42,
+                "noise_type": "uniform",
+            },
         }
 
         self.model_config = config

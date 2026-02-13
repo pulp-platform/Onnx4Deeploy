@@ -149,11 +149,11 @@ class ConvStem(nn.Module):
     """
 
     def __init__(
-        self, in_channels=1, out_channels=48, kernel_sizes=(25, 100), stride=4, pool_kernel=4
+        self, in_channels=1, out_channels=48, kernel_sizes=(25, 200, 100), stride=4, pool_kernel=4
     ):
         super().__init__()
         # Divide the total output channels equally across the 2 branches
-        branch_out_channels = out_channels // 2
+        branch_out_channels = out_channels // 3
 
         # Branch 1: Kernel size 25 (fine-grained features)
         self.branch1 = nn.Sequential(
@@ -178,7 +178,7 @@ class ConvStem(nn.Module):
             nn.ReLU(inplace=False),
         )
 
-        # Branch 2: Kernel size 100 (coarse-grained features)
+        # Branch 2: Kernel size 200 (middle-grained features)
         self.branch2 = nn.Sequential(
             nn.Conv2d(
                 in_channels=in_channels,
@@ -186,6 +186,29 @@ class ConvStem(nn.Module):
                 kernel_size=(1, kernel_sizes[1]),
                 stride=(1, stride),
                 padding=(0, kernel_sizes[1] // 2),
+                bias=False,
+            ),
+            nn.ReLU(inplace=True),
+            nn.MaxPool2d(kernel_size=(1, pool_kernel), stride=(1, pool_kernel)),
+            nn.Conv2d(
+                in_channels=branch_out_channels,
+                out_channels=branch_out_channels,
+                kernel_size=(1, 3),
+                stride=(1, 2),
+                padding=(0, 1),
+                bias=False,
+            ),
+            nn.ReLU(inplace=True),
+        )
+
+        # Branch 3: Kernel size 100 (coarse-grained features)
+        self.branch3 = nn.Sequential(
+            nn.Conv2d(
+                in_channels=in_channels,
+                out_channels=branch_out_channels,
+                kernel_size=(1, kernel_sizes[2]),
+                stride=(1, stride),
+                padding=(0, kernel_sizes[2] // 2),
                 bias=False,
             ),
             nn.ReLU(inplace=False),
@@ -214,9 +237,12 @@ class ConvStem(nn.Module):
         """
         x1 = self.branch1(x)
         x2 = self.branch2(x)
+        x3 = self.branch3(x)
         # Single concatenation (Deeploy compatible)
-        x = torch.cat((x1, x2), dim=1)
-        return x
+        x12 = torch.cat((x1, x2), dim=1)
+        x123 = torch.cat((x12, x3), dim=1)
+        print(f"ConvStem output shape: {x123.shape}")  # Debug print to verify output shape
+        return x123
 
 
 class Encoder(nn.Module):
@@ -327,7 +353,7 @@ class SleepConViT(nn.Module):
         self.conv_stem = ConvStem(
             in_channels=1,
             out_channels=self.model_dim,
-            kernel_sizes=(25, 100),  # 2 branches: fine-grained (25) and coarse-grained (100)
+            kernel_sizes=(25, 200, 100),  # 2 branches: fine-grained (25) and coarse-grained (100)
             stride=4,
         )
 
