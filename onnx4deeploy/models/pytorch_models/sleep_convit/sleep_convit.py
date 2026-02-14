@@ -331,7 +331,6 @@ class ConvStem(nn.Module):
         x3 = self.branch3(x)
         # Cascaded concatenation (prevents ONNX fusion into single 3-input concat)
         x = self.concat(x1, x2, x3)
-        print(f"ConvStem output shape: {x.shape}")  # Debug print to verify output shape
         return x
 
 
