@@ -12,7 +12,7 @@ Mamba model now exports **clean ONNX graphs** using custom operators:
 
 ### 1. Custom Operator Definition
 
-Located in `onnx4deeploy/models/pytorch_models/mamba/mamba_clean.py`:
+Located in `onnx4deeploy/models/pytorch_models/mamba/mamba.py`:
 
 ```python
 class SelectiveSSMFunction(Function):
@@ -99,15 +99,6 @@ Output
 ```
 
 **Total: ~10-15 high-level nodes per layer**
-
-## Files
-
-| File | Purpose |
-|------|---------|
-| `mamba_exporter.py` | Simplified exporter (custom ops only) |
-| `mamba_clean.py` | CleanMamba model with SelectiveSSMFunction |
-| `mamba.py` | Original implementation (kept for reference) |
-| `mamba_decomposed.py` | Decomposed SSM (kept for reference) |
 
 ## Custom Operator Details
 
