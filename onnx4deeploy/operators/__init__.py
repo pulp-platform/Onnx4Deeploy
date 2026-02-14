@@ -32,7 +32,6 @@ from .reducesum import ReduceSumOperatorTest
 from .relu import ReluOperatorTest
 from .relu_exporter import ReluExporter
 from .relu_grad import ReluGradOperatorTest
-from .selu import SeluOperatorTest
 from .sgd import SGDOperatorTest
 from .softmax_cross_entropy import SoftmaxCrossEntropyOperatorTest
 from .softmax_cross_entropy_grad import SoftmaxCrossEntropyGradOperatorTest
@@ -47,7 +46,6 @@ __all__ = [
     "ReluExporter",
     "AddOperatorTest",
     "ReluOperatorTest",
-    "SeluOperatorTest",
     "GemmOperatorTest",
     "MatMulOperatorTest",
     "ReduceSumOperatorTest",
