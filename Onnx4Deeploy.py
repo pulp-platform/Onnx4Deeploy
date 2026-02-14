@@ -173,6 +173,7 @@ def list_available_operators():
         "Add": "Addition operator",
         "Relu": "ReLU activation function",
         "Transpose": "Tensor transpose",
+        "Concat": "Tensor concatenation (supports 3 inputs)",
         "Split": "Tensor split",
         # Matrix operations
         "Gemm": "General matrix multiplication",
@@ -188,6 +189,7 @@ def list_available_operators():
         "GroupNormGradX": "Group normalization input gradient",
         "GroupNormGradW": "Group normalization weight gradient",
         # Convolution
+        "Conv2D": "2D convolution (supports asymmetric padding)",
         "ConvGradX": "Convolution input gradient",
         "ConvGradW": "Convolution weight gradient",
         "ConvGradB": "Convolution bias gradient",

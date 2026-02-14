@@ -131,6 +131,94 @@ class MLPHead(nn.Module):
         return x
 
 
+class CascadedConcatFunction(torch.autograd.Function):
+    """
+    Custom autograd function for cascaded concatenation with ONNX export support.
+
+    This function ensures that ONNX export produces two separate 2-input Concat nodes
+    instead of a single 3-input Concat node (which ONNX optimizer would normally create).
+    """
+
+    @staticmethod
+    def forward(ctx, x1, x2, x3, dim):
+        """
+        Forward pass: concatenate x1, x2, x3 in cascaded manner.
+
+        Args:
+            ctx: Context object (unused, no backward needed for inference)
+            x1: First tensor to concatenate
+            x2: Second tensor to concatenate
+            x3: Third tensor to concatenate
+            dim: Dimension along which to concatenate
+
+        Returns:
+            Concatenated tensor (x1 + x2) + x3
+        """
+        # First concat: x1 + x2
+        x12 = torch.cat([x1, x2], dim=dim)
+        # Second concat: x12 + x3
+        x123 = torch.cat([x12, x3], dim=dim)
+        return x123
+
+    @staticmethod
+    def symbolic(g, x1, x2, x3, dim):
+        """
+        ONNX symbolic function: explicitly create two Concat nodes.
+
+        Args:
+            g: ONNX graph builder
+            x1: First input
+            x2: Second input
+            x3: Third input
+            dim: Concatenation axis (as integer)
+
+        Returns:
+            ONNX graph with two cascaded Concat operations
+        """
+        # Extract the constant value if dim is a node
+        if hasattr(dim, "node") and dim.node().kind() == "onnx::Constant":
+            dim_value = dim.node()["value"]
+        else:
+            # dim is already an integer
+            dim_value = dim
+
+        # First Concat node: x1 + x2
+        x12 = g.op("Concat", x1, x2, axis_i=dim_value)
+        # Second Concat node: x12 + x3
+        x123 = g.op("Concat", x12, x3, axis_i=dim_value)
+        return x123
+
+
+class CascadedConcat(nn.Module):
+    """
+    Cascaded Concatenation layer that exports as two separate 2-input ONNX Concat nodes.
+
+    This prevents ONNX optimizer from fusing into a single 3-input Concat operation,
+    which is important for hardware deployment compatibility.
+
+    Args:
+        dim: Dimension along which to concatenate (default: 1)
+    """
+
+    def __init__(self, dim=1):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, x1, x2, x3):
+        """
+        Forward pass with cascaded concatenation.
+
+        Args:
+            x1: First tensor to concatenate
+            x2: Second tensor to concatenate
+            x3: Third tensor to concatenate
+
+        Returns:
+            Concatenated tensor from (x1 + x2) + x3
+        """
+        return CascadedConcatFunction.apply(x1, x2, x3, self.dim)
+
+
 class ConvStem(nn.Module):
     """
     Dual-Branch Convolutional Stem for feature extraction and downsampling (2D version).
@@ -152,8 +240,11 @@ class ConvStem(nn.Module):
         self, in_channels=1, out_channels=48, kernel_sizes=(25, 200, 100), stride=4, pool_kernel=4
     ):
         super().__init__()
-        # Divide the total output channels equally across the 2 branches
+        # Divide the total output channels equally across the 3 branches
         branch_out_channels = out_channels // 3
+
+        # Cascaded concatenation layer (prevents ONNX fusion)
+        self.concat = CascadedConcat(dim=1)
 
         # Branch 1: Kernel size 25 (fine-grained features)
         self.branch1 = nn.Sequential(
@@ -238,11 +329,9 @@ class ConvStem(nn.Module):
         x1 = self.branch1(x)
         x2 = self.branch2(x)
         x3 = self.branch3(x)
-        # Single concatenation (Deeploy compatible)
-        x12 = torch.cat((x1, x2), dim=1)
-        x123 = torch.cat((x12, x3), dim=1)
-        print(f"ConvStem output shape: {x123.shape}")  # Debug print to verify output shape
-        return x123
+        # Cascaded concatenation (prevents ONNX fusion into single 3-input concat)
+        x = self.concat(x1, x2, x3)
+        return x
 
 
 class Encoder(nn.Module):
@@ -427,9 +516,9 @@ class SleepConViT(nn.Module):
         x = x.reshape(self.batch_size, self.model_dim, self.num_patches).permute(0, 2, 1)
 
         # Prepend CLS token: (B, num_patches, model_dim) -> (B, num_patches+1, model_dim)
-        # Expand CLS token to match batch size
-        cls_tokens = self.cls_token.expand(self.batch_size, -1, -1)
-        x = torch.cat((cls_tokens, x), dim=1)
+        # For batch_size=1 inference: cls_token is already (1, 1, model_dim), no expand needed
+        # This avoids ConstantOfShape/Where nodes in ONNX export
+        x = torch.cat((self.cls_token, x), dim=1)
 
         # Add positional embeddings
         x = x + self.pos_embed

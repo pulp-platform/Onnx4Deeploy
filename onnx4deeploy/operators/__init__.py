@@ -12,6 +12,7 @@ from .add import AddOperatorTest
 from .averagepool import AveragePoolOperatorTest
 from .averagepool_grad import AveragePoolGradOperatorTest
 from .base_operator import BaseOperatorTest, SimpleElementwiseOperator
+from .concat import ConcatOperatorTest
 from .conv2d import Conv2DOperatorTest
 from .conv_grad_b import ConvGradBOperatorTest
 from .conv_grad_w import ConvGradWOperatorTest
@@ -36,6 +37,7 @@ from .softmax_cross_entropy import SoftmaxCrossEntropyOperatorTest
 from .softmax_cross_entropy_grad import SoftmaxCrossEntropyGradOperatorTest
 from .softmax_grad import SoftmaxGradOperatorTest
 from .split import SplitOperatorTest
+from .sub import SubOperatorTest
 from .transpose import TransposeOperatorTest
 
 __all__ = [
@@ -47,7 +49,9 @@ __all__ = [
     "GemmOperatorTest",
     "MatMulOperatorTest",
     "ReduceSumOperatorTest",
+    "ConcatOperatorTest",
     "SplitOperatorTest",
+    "SubOperatorTest",
     "TransposeOperatorTest",
     "MaxPoolOperatorTest",
     "AveragePoolOperatorTest",

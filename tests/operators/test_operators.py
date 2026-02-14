@@ -27,6 +27,7 @@ from onnx4deeploy.operators import (
     ReluOperatorTest,
     SGDOperatorTest,
     SplitOperatorTest,
+    SubOperatorTest,
     TransposeOperatorTest,
 )
 
@@ -79,6 +80,70 @@ class TestAddOperator:
 
             test = AddOperatorTest(config_path=config_path, save_path=operator_test_dir)
             test.generate()
+
+
+class TestSubOperator:
+    """Tests for Sub operator."""
+
+    def test_sub_basic(self, operator_test_dir):
+        """Test basic Sub operator functionality."""
+        # Create config
+        config_path = os.path.join(operator_test_dir, "config.yaml")
+        with open(config_path, "w") as f:
+            f.write("sub:\n  input_shape: [1, 64, 128]\n")
+
+        # Generate operator test
+        test = SubOperatorTest(config_path=config_path, save_path=operator_test_dir)
+        onnx_file, input_file, output_file = test.generate()
+
+        # Verify files were created
+        assert os.path.exists(onnx_file)
+        assert os.path.exists(input_file)
+        assert os.path.exists(output_file)
+
+        # Verify data
+        inputs = np.load(input_file)
+        outputs = np.load(output_file)
+
+        assert "input_a" in inputs
+        assert "input_b" in inputs
+        assert "output" in outputs
+
+        # Verify output correctness
+        expected = inputs["input_a"] - inputs["input_b"]
+        np.testing.assert_allclose(outputs["output"], expected, rtol=1e-5, atol=1e-5)
+
+    def test_sub_different_shapes(self, operator_test_dir):
+        """Test Sub operator with different input shapes."""
+        shapes = [[1, 32, 64], [8, 16, 32], [1, 128, 256]]
+
+        for shape in shapes:
+            config_path = os.path.join(operator_test_dir, f"config_{shape[1]}.yaml")
+            with open(config_path, "w") as f:
+                f.write(f"sub:\n  input_shape: {shape}\n")
+
+            test = SubOperatorTest(config_path=config_path, save_path=operator_test_dir)
+            test.generate()
+
+    def test_sub_result_range(self, operator_test_dir):
+        """Test that Sub correctly computes subtraction with proper range."""
+        config_path = os.path.join(operator_test_dir, "config.yaml")
+        with open(config_path, "w") as f:
+            f.write("sub:\n  input_shape: [1, 64, 32, 32]\n")
+
+        test = SubOperatorTest(config_path=config_path, save_path=operator_test_dir)
+        onnx_file, input_file, output_file = test.generate()
+
+        inputs = np.load(input_file)
+        outputs = np.load(output_file)
+
+        # Verify the subtraction was computed correctly
+        # Result should be in range [min(a)-max(b), max(a)-min(b)]
+        expected_min = inputs["input_a"].min() - inputs["input_b"].max()
+        expected_max = inputs["input_a"].max() - inputs["input_b"].min()
+
+        assert outputs["output"].min() >= expected_min - 1e-5
+        assert outputs["output"].max() <= expected_max + 1e-5
 
 
 class TestReluOperator:
