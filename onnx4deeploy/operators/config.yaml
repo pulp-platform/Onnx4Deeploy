@@ -1,0 +1,34 @@
+# SPDX-FileCopyrightText: 2025 ETH Zurich and University of Bologna
+#
+# SPDX-License-Identifier: MIT
+
+# Default operator test configurations
+
+# Sub operator configuration
+sub:
+  input_shape: [1, 64, 32, 32]  # NCHW format
+  opset_version: 14
+
+# Selu operator configuration
+selu:
+  input_shape: [1, 64, 32, 32]  # NCHW format
+  opset_version: 13
+  # Note: alpha and gamma use ONNX default values
+
+# Conv2D with asymmetric padding test - LARGE VERSION for tiling
+# This will trigger tiling due to memory constraints
+conv2d:
+  input_shape: [1, 2, 16, 16]  # NCHW: batch=1, channels=32, height=64, width=64
+  kernel_size: 3
+  stride: 1
+  padding: [1, 2, 1, 2]  # [top, left, bottom, right] - asymmetric!
+  out_channels: 2
+  use_bias: false
+  group: 1
+  dilation: 1
+
+# Concat with 3 inputs
+concat:
+  num_inputs: 3
+  axis: 1  # Concatenate along channel dimension
+  base_shape: [1, 4, 8, 8]  # NCHW: each input has 4 channels, output will have 12 channels
