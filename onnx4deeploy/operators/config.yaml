@@ -18,7 +18,7 @@ selu:
 # Conv2D with asymmetric padding test - LARGE VERSION for tiling
 # This will trigger tiling due to memory constraints
 conv2d:
-  input_shape: [1, 2, 16, 16]  # NCHW: batch=1, channels=32, height=64, width=64
+  input_shape: [1, 2, 16, 16]  # NCHW: batch=1, channels=2, height=16, width=16
   kernel_size: 3
   stride: 1
   padding: [1, 2, 1, 2]  # [top, left, bottom, right] - asymmetric!
