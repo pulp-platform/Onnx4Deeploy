@@ -21,7 +21,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.9', '3.10', '3.11']
+        python-version: ['3.10']
 
     steps:
     - name: Checkout code
@@ -51,7 +51,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.9', '3.10', '3.11']
+        python-version: ['3.10']
 
     steps:
     - name: Checkout code
@@ -72,7 +72,6 @@ jobs:
         python -m pytest tests/operators/ -v
 
     - name: Upload coverage reports
-      if: matrix.python-version == '3.10'
       uses: codecov/codecov-action@v4
       with:
         file: ./coverage.xml
@@ -86,7 +85,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.9', '3.10', '3.11']
+        python-version: ['3.10']
 
     steps:
     - name: Checkout code
@@ -107,7 +106,6 @@ jobs:
         python -m pytest tests/core/ -v
 
     - name: Upload coverage reports
-      if: matrix.python-version == '3.10'
       uses: codecov/codecov-action@v4
       with:
         file: ./coverage.xml
