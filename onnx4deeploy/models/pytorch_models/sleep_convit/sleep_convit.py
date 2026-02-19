@@ -240,7 +240,7 @@ class ConvStem(nn.Module):
         self, in_channels=1, out_channels=48, kernel_sizes=(25, 200, 100), stride=4, pool_kernel=4
     ):
         super().__init__()
-        # Divide the total output channels equally across the 2 branches
+        # Divide the total output channels equally across the 3 branches
         branch_out_channels = out_channels // 3
 
         # Cascaded concatenation layer (prevents ONNX fusion)
@@ -331,7 +331,6 @@ class ConvStem(nn.Module):
         x3 = self.branch3(x)
         # Cascaded concatenation (prevents ONNX fusion into single 3-input concat)
         x = self.concat(x1, x2, x3)
-        print(f"ConvStem output shape: {x.shape}")  # Debug print to verify output shape
         return x
 
 
