@@ -13,7 +13,7 @@ from onnx4deeploy.transform.model_transform import ensure_all_tensor_shapes
 def generate_zo_graph(inference_onnx:str, output_onnx:str, zo_config:dict) -> None:
     """ Generate MeZO ONNX graph for model based on its inference onnx"""
 
-    epsilon, seed, noise_type = zo_config["epsilon"], zo_config["seed"], zo_config["noise_type"] 
+    epsilon, seed, noise_type, exceptions = zo_config["epsilon"], zo_config["seed"], zo_config["noise_type"], zo_config.get("exceptions", []) 
     
     base_path = os.path.dirname(output_onnx)
     os.makedirs(base_path, exist_ok=True)
@@ -21,7 +21,8 @@ def generate_zo_graph(inference_onnx:str, output_onnx:str, zo_config:dict) -> No
                               output_path=output_onnx,
                               epsilon=epsilon,
                               seed=seed,
-                              noise_type=noise_type)
+                              noise_type=noise_type,
+                              exceptions=exceptions)
     
     ensure_all_tensor_shapes(model_path=output_onnx, output_path=output_onnx)
     # append_cross_entropy_loss(output_onnx, output_onnx, label_name='label')
@@ -32,6 +33,7 @@ def inject_perturbation_nodes(
     epsilon: float = 0.01,
     seed: float = 42.0,
     noise_type: str = "gaussian",
+    exceptions: list[str] = []
 ) -> None:
     """
     This function inserts statically-seeded random operators. The unique seed for each
@@ -63,7 +65,7 @@ def inject_perturbation_nodes(
 
     print(f"Found {len(weights_and_biases)} weight/bias tensors to perturb.")
 
-    def modify_graph(original_model: onnx.ModelProto, output_path: str):
+    def modify_graph(original_model: onnx.ModelProto, output_path: str, exceptions: list[str]):
         new_nodes = []
         extra_value_infos = []
 
@@ -81,7 +83,8 @@ def inject_perturbation_nodes(
 
         for node in original_model.graph.node:
             # Check if this is a node we want to modify
-            if node.op_type in ["Conv", "Gemm", "MatMul"]:
+            if node.op_type in ["Conv", "Gemm", "MatMul"] and node.name not in exceptions:
+                print(F"node: {node.name}, op_type: {node.op_type}")
                 modified_inputs = list(node.input)
                 made_change = False
 
@@ -211,7 +214,7 @@ def inject_perturbation_nodes(
 
     print(f"Found {len(original_model.graph.initializer)} initializers. Perturbing weights/biases in Conv, MatMul, Gemm nodes.")
 
-    modify_graph(original_model, output_path)
+    modify_graph(original_model, output_path, exceptions=exceptions)
 
     print(f"Saved perturbed models to:\n- {output_path}")
     return output_path

@@ -176,7 +176,12 @@ def randomize_onnx_initializers(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
         tensor = numpy_helper.to_array(initializer)
 
         # Randomize the values
-        randomized_tensor = np.random.randn(*tensor.shape).astype(tensor.dtype)
+        print(F"Randomizing initializer '{initializer.name}' with shape {tensor.shape}")
+    
+        randomized_tensor = np.random.randn(*tensor.shape)
+        if not isinstance(randomized_tensor, np.ndarray):
+            randomized_tensor = np.array(randomized_tensor)
+        randomized_tensor = randomized_tensor.astype(tensor.dtype)
 
         # Update the initializer
         new_initializer = numpy_helper.from_array(randomized_tensor, initializer.name)

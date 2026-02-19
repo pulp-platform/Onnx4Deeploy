@@ -517,9 +517,6 @@ class BaseONNXExporter(ABC):
         model = self.create_model()
         model.eval()  # Zeroth-Order Training mode
 
-        # Store model for test data generation
-        self._model = model
-
         # Generate input
         input_shape = self.get_input_shape()
         input_tensor = torch.randn(*input_shape, dtype=torch.float32)
@@ -530,16 +527,26 @@ class BaseONNXExporter(ABC):
         opset_version = self.config.get("opset_version", 12)
         onnx_model = self._export_to_onnx(model, input_tensor, opset_version)
 
-        # Randomize initializers for testing
-        onnx_model = randomize_onnx_initializers(onnx_model)
-
-        # Save inference model
+        # Save
         onnx.save(onnx_model, self.paths["network_infer"])
-        print(f"✅ Inference ONNX saved: {self.paths['network_infer']}")
-
+        print(f"✅ ONNX model saved: {self.paths['network_infer']}")
+ 
         # Run inference optimizations
         print("\n🔧 Running inference optimizations...")
         self.run_inference_optimization(self.paths["network_infer"], self.paths["network_infer"])
+
+        # Run shape inference
+        print("\n🔍 Running shape inference...")
+        from ..optimization.shape_optimizer import infer_shapes_with_custom_ops
+
+        infer_shapes_with_custom_ops(self.paths["network_infer"], self.paths["network_infer"])
+
+        # Save test input/output data if method is implemented
+        if hasattr(self, "save_test_data"):
+            try:
+                self.save_test_data(model, self.paths["output_dir"])
+            except Exception as e:
+                print(f"⚠️  Failed to save test data: {e}")
 
         # Reload optimized model
         onnx_model = onnx.load(self.paths["network_infer"])
@@ -555,6 +562,8 @@ class BaseONNXExporter(ABC):
 
         # Transform model for zeroth-order training (e.g., add noise nodes, modify outputs)
         print("\n🔧 Transforming model for zeroth-order training...")
+        # Randomize initializers for testing
+        onnx_model = randomize_onnx_initializers(onnx_model)
         generate_zo_graph(
             inference_onnx=self.paths["network_infer"],
             output_onnx=self.paths["network_zo_train"],
