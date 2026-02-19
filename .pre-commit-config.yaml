@@ -81,6 +81,7 @@ repos:
   - id: pretty-format-yaml
     args: [--autofix, --indent, '2']
     exclude: ^\.github/workflows/
+    additional_dependencies: [setuptools]
 
 - repo: local
   hooks:
