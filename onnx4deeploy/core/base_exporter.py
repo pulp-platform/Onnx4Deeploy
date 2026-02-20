@@ -251,7 +251,7 @@ class BaseONNXExporter(ABC):
                     "network_pre_sgd": os.path.join(output_dir, "network_pre_sgd.onnx"),
                 }
             )
-            
+        
         if mode == ExportMode.ZO_TRAINING:
             paths.update(
                 {
@@ -335,6 +335,10 @@ class BaseONNXExporter(ABC):
         input_tensor = torch.randn(*input_shape, dtype=torch.float32)
         print(f"   Input shape: {input_shape}")
 
+        # initialize weights and biases for testing
+        for param in model.parameters():
+            if param.requires_grad:
+                torch.nn.init.normal_(param, mean=0.0, std=0.02)
         # Export to ONNX
         print("\n📤 Exporting to ONNX...")
         opset_version = self.config.get("opset_version", 12)
@@ -494,7 +498,7 @@ class BaseONNXExporter(ABC):
         print(f"{'='*60}\n")
 
         return self.paths["network"]
-    
+
     def export_zo_training(self, save_path: Optional[str] = None) -> str:
         """
         Export model in zeroth-order training mode.
@@ -530,7 +534,7 @@ class BaseONNXExporter(ABC):
         # Save
         onnx.save(onnx_model, self.paths["network_infer"])
         print(f"✅ ONNX model saved: {self.paths['network_infer']}")
- 
+
         # Run inference optimizations
         print("\n🔧 Running inference optimizations...")
         self.run_inference_optimization(self.paths["network_infer"], self.paths["network_infer"])

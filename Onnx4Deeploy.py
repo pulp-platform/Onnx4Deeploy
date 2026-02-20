@@ -155,6 +155,7 @@ def list_available_operators():
         # Matrix operations
         "Gemm": "General matrix multiplication",
         "MatMul": "Matrix multiplication",
+        "Conv2d": "2D convolution",
         # Pooling
         "MaxPool": "Max pooling",
         "AveragePool": "Average pooling",

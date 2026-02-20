@@ -12,3 +12,13 @@ perturbrademacher:
 
 perturbeggroll:
   input_shape: [128, 48]
+
+conv2d:
+  input_shape: [1, 1, 28, 28]
+  kernel_size: 5
+  out_channels: 16
+  stride: 1
+  padding: 0 
+  use_bias: true
+  group: 1
+  dilation: 1
