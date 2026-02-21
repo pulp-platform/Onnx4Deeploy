@@ -112,7 +112,7 @@ def inject_perturbation_nodes(
                                 "PerturbNormal",
                                 inputs=[input_name],
                                 outputs=[perturbed_tensor_name],
-                                name=f"perturbnormal{perturbed_tensor_name}",
+                                name=f"perturbnormal_{perturbed_tensor_name}",
                                 domain="mezo",
                                 seed=seed,
                                 eps=epsilon,
@@ -120,22 +120,91 @@ def inject_perturbation_nodes(
                                 # dtype=dtype,
                                 doc_string="y = x + epsilon * RandomNormal(x, seed)"
                             )
+                            new_nodes.append(perturbation_node)
+
                         elif noise_type == "uniform":
                             perturbation_node = helper.make_node(
                                 "PerturbUniform",
                                 inputs=[input_name],
                                 outputs=[perturbed_tensor_name],
-                                name=f"perturbuniform{perturbed_tensor_name}",
+                                name=f"perturbuniform_{perturbed_tensor_name}",
                                 domain="mezo",
                                 idx=perturbation_counter,
                                 seed=seed,
                                 eps=epsilon,
-                                low=-1.0,
-                                high=1.0,
+                                low=-np.sqrt(3),
+                                high=np.sqrt(3),
                                 # dtype=dtype,
                                 doc_string="y = x + epsilon * RandomUniform(x, seed)"
                             )
-                        new_nodes.append(perturbation_node)
+                            new_nodes.append(perturbation_node)
+
+                        elif noise_type == "triangle":
+                            perturbation_node = helper.make_node(
+                                "PerturbTriangle",
+                                inputs=[input_name],
+                                outputs=[perturbed_tensor_name],
+                                name=f"perturbtriangle_{perturbed_tensor_name}",
+                                domain="mezo",
+                                idx=perturbation_counter,
+                                seed=seed,
+                                eps=epsilon,
+                                low=-np.sqrt(6),
+                                high=np.sqrt(6),
+                                # dtype=dtype,
+                                doc_string="y = x + epsilon * RandomTriangle(x, seed)"
+                            )
+                            new_nodes.append(perturbation_node)
+
+                        elif noise_type == "rademacher":
+                            perturbation_node = helper.make_node(
+                                "PerturbRademacher",
+                                inputs=[input_name],
+                                outputs=[perturbed_tensor_name],
+                                name=f"perturbrademacher_{perturbed_tensor_name}",
+                                domain="mezo",
+                                idx=perturbation_counter,
+                                seed=seed,
+                                eps=epsilon,
+                                # dtype=dtype,
+                                doc_string="y = x + epsilon * RandomRademacher(x, seed)"
+                            )
+                            new_nodes.append(perturbation_node)
+
+                        elif noise_type == "eggroll":
+                            # Shape annotation for intermediate outputs
+                            a_shape = [noise_shape[0], 1]
+                            b_shape = [int(np.prod(noise_shape[1:])), 1]
+
+                            extra_value_infos.append(helper.make_tensor_value_info(
+                                f"a_{perturbed_tensor_name}", TensorProto.FLOAT, a_shape
+                            ))
+                            extra_value_infos.append(helper.make_tensor_value_info(
+                                f"b_{perturbed_tensor_name}", TensorProto.FLOAT, b_shape
+                            ))
+
+                            # Eggroll noise node (without loss_grad input)
+                            noise_node = helper.make_node(
+                                "GenerateEggrollNoise",
+                                inputs=[input_name],
+                                outputs=[f"a_{perturbed_tensor_name}", f"b_{perturbed_tensor_name}"],
+                                name=f"gen_eggroll_noise_{perturbed_tensor_name}",
+                                domain="com.microsoft"
+                            )
+
+                            gemm_node = helper.make_node(
+                                "Gemm",
+                                inputs=[f"a_{perturbed_tensor_name}", f"b_{perturbed_tensor_name}", input_name],
+                                outputs=[perturbed_tensor_name],
+                                name=f"eggroll_gemm_{perturbed_tensor_name}",
+                                transA=0,
+                                transB=1,
+                                alpha=epsilon,
+                                beta=0
+                            )
+                        
+                            new_nodes.append(noise_node)
+                            new_nodes.append(gemm_node)
 
                         # **CRITICAL**: annotate perturbed edge with same dtype/shape as weight
                         if len(original_weight_tensor.dims) == 1:

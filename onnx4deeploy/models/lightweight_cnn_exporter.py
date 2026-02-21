@@ -52,7 +52,7 @@ class LightweightCnnExporter(BaseONNXExporter):
             "zo": {
                 "epsilon": 0.1,
                 "seed": 42,
-                "noise_type": "uniform",
+                "noise_type": "eggroll",
             }
         }
 
