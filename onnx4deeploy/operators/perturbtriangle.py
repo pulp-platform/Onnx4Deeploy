@@ -54,8 +54,7 @@ class PerturbTriangleOperatorTest(BaseOperatorTest):
             inputs=["x"],
             outputs=["perturbed_x"],
             name="perturb_triangle_node",
-            domain="com.microsoft",
-            reduction="mean",
+            domain="com.microsoft"
         )
 
         # Graph

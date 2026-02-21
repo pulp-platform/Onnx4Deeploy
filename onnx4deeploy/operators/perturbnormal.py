@@ -6,12 +6,71 @@
 
 from typing import Any, Dict, Tuple
 
+
+import torch
+from torch.autograd import Function
 import numpy as np
 import onnxruntime as ort
 from onnx import TensorProto, helper
 
 from .base_operator import BaseOperatorTest
 
+
+class Xorshift32:
+    def __init__(self, seed: int = 0):
+        self.state = seed if seed != 0 else 1  # Avoid zero state
+
+    def next(self) -> int:
+        # Xorshift32 algorithm
+        self.state ^= (self.state << 13) & 0xFFFFFFFF
+        self.state ^= (self.state >> 17) & 0xFFFFFFFF
+        self.state ^= (self.state << 5) & 0xFFFFFFFF
+        return self.state
+    
+class Ziggurat():
+    def __init__(self, seed: int = 0):
+        self.seed = seed if seed != 0 else 1  # Avoid zero state
+        # Precompute the Ziggurat tables
+        self.N = 256  # Number of layers
+        self.R = 3.442619855899  # Right tail boundary
+        self.x = np.zeros(self.N + 1)
+        self.y = np.zeros(self.N)
+        self.x[0] = self.R
+        self.x[self.N] = 0
+        for i in range(1, self.N):
+            self.x[i] = np.sqrt(-2.0 * np.log(np.exp(-0.5 * self.x[i-1]**2)))
+        for i in range(self.N):
+            self.y[i] = np.exp(-0.5 * self.x[i]**2)
+        self.rng = Xorshift32(self.seed)
+
+    def next(self) -> float:
+        while True:
+            # Generate random layer index
+            k = self.rng.next() % self.N
+            # Generate uniform random number
+            u = self.rng.next() / 0xFFFFFFFF
+            x = u * (self.x[k] - self.x[k+1]) + self.x[k+1]
+            # Accept or reject
+            if u < self.y[k] / self.y[k+1]:
+                return x
+            if x < self.R:
+                y = np.exp(-0.5 * x * x)
+                if u * (self.y[k+1] - self.y[k]) < (y - self.y[k]):
+                    return x
+
+class PerturbNormalFunction(Function):
+    @staticmethod
+    def forward(ctx, x, seed=42, epsilon=0.01):
+        # generate noise using Xorshift.
+        rng = Ziggurat(seed)
+        for _ in range(x.numel()):
+            noise = rng.next() * epsilon
+        perturbed_x = x + noise
+        return perturbed_x
+    
+    @staticmethod
+    def symbolic(g, x):
+        return g.op("ai.zo::PerturbNormal", x, outputs=1)
 
 class PerturbNormalOperatorTest(BaseOperatorTest):
     """Test generator for ONNX PerturbNormal operator (custom/training op)."""
@@ -55,8 +114,12 @@ class PerturbNormalOperatorTest(BaseOperatorTest):
             inputs=["x"],
             outputs=["perturbed_x"],
             name="perturb_normal_node",
-            domain="com.microsoft",
-            reduction="mean",
+            seed=42,
+            eps=0.01,
+            idx=0,
+            # dtype=dtype,
+            doc_string="y = x + epsilon * RandomNormal(x, seed)",
+            domain="com.microsoft"
         )
 
         # Graph

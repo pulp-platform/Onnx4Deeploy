@@ -55,8 +55,14 @@ class PerturbUniformOperatorTest(BaseOperatorTest):
             inputs=["x"],
             outputs=["perturbed_x"],
             name="perturb_uniform_node",
-            domain="com.microsoft",
-            reduction="mean",
+            idx=0,
+            seed=42,
+            eps=0.01,
+            low=-np.sqrt(3),
+            high=np.sqrt(3),
+            # dtype=dtype,
+            doc_string="y = x + epsilon * RandomUniform(x, seed)",
+            domain="com.microsoft"
         )
 
         # Graph

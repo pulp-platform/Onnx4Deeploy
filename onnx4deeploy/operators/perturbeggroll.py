@@ -33,11 +33,11 @@ class PerturbEggrollOperatorTest(BaseOperatorTest):
         self.input_shape = tuple(pn_config["input_shape"])
         return config
 
-    
+
     def generate_inputs(self) -> np.ndarray:
         """Generate input with both positive and negative values."""
         return {"x": np.random.randn(*self.input_shape).astype(np.float32)}
-    
+
     def create_onnx_graph(self, inputs: Dict[str, np.ndarray]):
         """Create ONNX graph for PerturbEggroll operator."""
         # Input tensors (without loss_grad for the final model)
@@ -49,24 +49,50 @@ class PerturbEggrollOperatorTest(BaseOperatorTest):
             "perturbed_x", TensorProto.FLOAT, self.input_shape
         )
 
-        # PerturbEggroll node (without loss_grad input)
-        perturb_node = helper.make_node(
-            "PerturbEggroll",
+        epsilon = 0.01  # Example scaling factor for the perturbation
+
+        # Shape annotation for intermediate outputs
+        a_shape = [self.input_shape[0], 1]
+        b_shape = [int(np.prod(self.input_shape[1:])), 1]
+
+        a_tensor = helper.make_tensor_value_info(
+            "a", TensorProto.FLOAT, a_shape
+        )
+        b_tensor = helper.make_tensor_value_info(
+            "b", TensorProto.FLOAT, b_shape
+        )
+
+        # Eggroll noise node (without loss_grad input)
+        noise_node = helper.make_node(
+            "GenerateEggrollNoise",
             inputs=["x"],
+            outputs=["a", "b"],
+            name="generate_eggroll_noise_node",
+            domain="com.microsoft"
+        )
+
+        gemm_node = helper.make_node(
+            "Gemm",
+            inputs=["a", "b", "x"],
             outputs=["perturbed_x"],
-            name="perturb_eggroll_node",
-            domain="com.microsoft",
-            reduction="mean",
+            name="gemm_node",
+            transA=0,
+            transB=1,
+            alpha=epsilon,
+            beta=0
         )
 
         # Graph
         graph = helper.make_graph(
-            [perturb_node],
+            [noise_node, gemm_node],
             "perturb_eggroll_graph",
             [x_tensor],
             [perturbed_x_tensor],
+            value_info=[a_tensor, b_tensor]  # <-- shape annotation here
         )
 
+        for vi in graph.value_info:
+            print(vi.name, [d.dim_value for d in vi.type.tensor_type.shape.dim])
         return graph
 
     def create_model(self, graph, opset_version: int = 13):
@@ -91,7 +117,7 @@ class PerturbEggrollOperatorTest(BaseOperatorTest):
         b = np.random.randn(self.input_shape[-1]).astype(np.float32)
         perturbation = np.outer(a, b)  # shape: input_shape
         perturbed_x = inputs["x"] + perturbation
-        
+
         return {"perturbed_x": perturbed_x}
 
     def compute_expected_output(self, inputs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
