@@ -62,34 +62,93 @@ class PerturbEggrollOperatorTest(BaseOperatorTest):
             "b", TensorProto.FLOAT, b_shape
         )
 
+        shape_input_name = helper.make_tensor(name=f"shape_x", data_type=TensorProto.INT64, dims=[len(self.input_shape)],
+                                                vals=np.array(self.input_shape, dtype=np.int64))
+        
+        if len(self.input_shape) > 2:
+
+            shape_flat_name = helper.make_tensor(name=f"shape_x_flat", data_type=TensorProto.INT64, dims=[2],
+                                                    vals=np.array([a_shape[0], b_shape[0]], dtype=np.int64))
+            # insert flattening nodes
+            flatten_node = helper.make_node(
+                "Reshape",
+                inputs=["x", f"shape_x_flat"],
+                outputs=[f"flattened_x"],
+                name=f"flatten_x"
+            )
+            
+            flattened_tensor_name = helper.make_tensor_value_info(
+                f"flattened_x", TensorProto.FLOAT,[a_shape[0], b_shape[0]]
+            )
+
+            unflatten_node = helper.make_node(
+                "Reshape",
+                inputs=["flattened_perturbed_x", "shape_x"],
+                outputs=["perturbed_x"],
+                name="unflatten_perturbed_x"
+            )
+            flattened_perturbed_tensor_name = helper.make_tensor_value_info(
+                "flattened_perturbed_x", TensorProto.FLOAT, [a_shape[0], b_shape[0]]
+            )
+            eggroll_input = "flattened_x"
+            eggroll_output = "flattened_perturbed_x"
+        else:
+            eggroll_input = "x"
+            eggroll_output = "perturbed_x"
+
         # Eggroll noise node (without loss_grad input)
-        noise_node = helper.make_node(
-            "GenerateEggrollNoise",
-            inputs=["x"],
-            outputs=["a", "b"],
-            name="generate_eggroll_noise_node",
-            domain="com.microsoft"
+        noise_node_a = helper.make_node(
+            "PerturbEggroll",
+            inputs=["shape_x"],
+            outputs=["a"],
+            name=f"gen_eggroll_noise_a",
+            seed=13,
+            idx=0,
+            domain="com.microsoft",
+            doc_string="a = RandomRademacher(x[0], seed)"
+        )
+        
+        noise_node_b = helper.make_node(
+            "PerturbEggroll",
+            inputs=["shape_x"],
+            outputs=["b"],
+            name=f"gen_eggroll_noise_b",
+            seed=14,
+            idx=1,
+            domain="com.microsoft",
+            doc_string="b = RandomRademacher(x[1:], seed)"
         )
 
         gemm_node = helper.make_node(
             "Gemm",
-            inputs=["a", "b", "x"],
-            outputs=["perturbed_x"],
-            name="gemm_node",
+            inputs=["a", "b", eggroll_input],
+            outputs=[eggroll_output],
+            name=f"eggroll_gemm_perturb_x",
             transA=0,
             transB=1,
             alpha=epsilon,
             beta=0
         )
-
         # Graph
-        graph = helper.make_graph(
-            [noise_node, gemm_node],
-            "perturb_eggroll_graph",
-            [x_tensor],
-            [perturbed_x_tensor],
-            value_info=[a_tensor, b_tensor]  # <-- shape annotation here
-        )
+        if len(self.input_shape) > 2:
+            graph = helper.make_graph(
+                [flatten_node, noise_node_a, noise_node_b, gemm_node, unflatten_node],
+                "perturb_eggroll_graph",
+                [x_tensor],
+                [perturbed_x_tensor],
+                [shape_input_name, shape_flat_name],  # <-- shape annotations here
+                value_info=[a_tensor, b_tensor, 
+                            flattened_tensor_name,
+                            flattened_perturbed_tensor_name]  # <-- shape annotation here
+            )
+        else:
+            graph = helper.make_graph(
+                [noise_node_a, noise_node_b, gemm_node],
+                "perturb_eggroll_graph",
+                [x_tensor],
+                [perturbed_x_tensor],
+                value_info=[a_tensor, b_tensor]  # <-- shape annotation here
+            )
 
         for vi in graph.value_info:
             print(vi.name, [d.dim_value for d in vi.type.tensor_type.shape.dim])
@@ -116,6 +175,8 @@ class PerturbEggrollOperatorTest(BaseOperatorTest):
         a = np.random.randn(*self.input_shape[:-1]).astype(np.float32)
         b = np.random.randn(self.input_shape[-1]).astype(np.float32)
         perturbation = np.outer(a, b)  # shape: input_shape
+        if len(self.input_shape) > 2:
+            perturbation = perturbation.reshape(self.input_shape)
         perturbed_x = inputs["x"] + perturbation
 
         return {"perturbed_x": perturbed_x}

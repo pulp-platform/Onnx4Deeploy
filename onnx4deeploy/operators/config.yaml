@@ -11,7 +11,7 @@ perturbrademacher:
   input_shape: [128, 48]
 
 perturbeggroll:
-  input_shape: [128, 48]
+  input_shape: [128, 16, 3, 3]
 
 conv2d:
   input_shape: [1, 1, 28, 28]

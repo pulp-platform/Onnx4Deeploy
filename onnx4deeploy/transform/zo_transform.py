@@ -13,8 +13,8 @@ from onnx4deeploy.transform.model_transform import ensure_all_tensor_shapes
 def generate_zo_graph(inference_onnx:str, output_onnx:str, zo_config:dict) -> None:
     """ Generate MeZO ONNX graph for model based on its inference onnx"""
 
-    epsilon, seed, noise_type, exceptions = zo_config["epsilon"], zo_config["seed"], zo_config["noise_type"], zo_config.get("exceptions", []) 
-    
+    epsilon, seed, noise_type, exceptions = zo_config["epsilon"], zo_config["seed"], zo_config["noise_type"], zo_config.get("exceptions", [])
+
     base_path = os.path.dirname(output_onnx)
     os.makedirs(base_path, exist_ok=True)
     inject_perturbation_nodes(inference_onnx,
@@ -23,7 +23,7 @@ def generate_zo_graph(inference_onnx:str, output_onnx:str, zo_config:dict) -> No
                               seed=seed,
                               noise_type=noise_type,
                               exceptions=exceptions)
-    
+
     ensure_all_tensor_shapes(model_path=output_onnx, output_path=output_onnx)
     # append_cross_entropy_loss(output_onnx, output_onnx, label_name='label')
 
@@ -175,6 +175,44 @@ def inject_perturbation_nodes(
                             # Shape annotation for intermediate outputs
                             a_shape = [noise_shape[0], 1]
                             b_shape = [int(np.prod(noise_shape[1:])), 1]
+                            shape_input_name = helper.make_tensor(name=f"shape_{input_name}", data_type=TensorProto.INT64, dims=[len(noise_shape)],
+                                                vals=np.array(noise_shape, dtype=np.int64))
+                            new_initializers.append(shape_input_name)
+
+                            if len(noise_shape) > 2:
+
+                                shape_flat_name = helper.make_tensor(name=f"shape_{input_name}_flat", data_type=TensorProto.INT64, dims=[2],
+                                                                      vals=np.array([a_shape[0], b_shape[0]], dtype=np.int64))
+                               
+                                new_initializers.append(shape_flat_name)
+
+                                # insert flattening nodes
+                                flatten_node = helper.make_node(
+                                    "Reshape",
+                                    inputs=[input_name, f"shape_{input_name}_flat"],
+                                    outputs=[f"flattened_{input_name}"],
+                                    name=f"flatten_{input_name}"
+                                )
+                                new_nodes.append(flatten_node)
+                                extra_value_infos.append(helper.make_tensor_value_info(
+                                    f"flattened_{input_name}", TensorProto.FLOAT,[noise_shape[0], int(np.prod(noise_shape[1:]))]
+                                ))
+
+                                unflatten_node = helper.make_node(
+                                    "Reshape",
+                                    inputs=[f"flattened_{perturbed_tensor_name}", f"shape_{input_name}"],
+                                    outputs=[perturbed_tensor_name],
+                                    name=f"unflatten_{perturbed_tensor_name}"
+                                )
+                                new_nodes.append(unflatten_node)
+                                extra_value_infos.append(helper.make_tensor_value_info(
+                                    f"flattened_{perturbed_tensor_name}", TensorProto.FLOAT, [noise_shape[0], int(np.prod(noise_shape[1:]))]
+                                ))
+                                eggroll_input = f"flattened_{input_name}"
+                                eggroll_output = f"flattened_{perturbed_tensor_name}"
+                            else:
+                                eggroll_input = input_name
+                                eggroll_output = perturbed_tensor_name
 
                             extra_value_infos.append(helper.make_tensor_value_info(
                                 f"a_{perturbed_tensor_name}", TensorProto.FLOAT, a_shape
@@ -184,26 +222,41 @@ def inject_perturbation_nodes(
                             ))
 
                             # Eggroll noise node (without loss_grad input)
-                            noise_node = helper.make_node(
-                                "GenerateEggrollNoise",
-                                inputs=[input_name],
-                                outputs=[f"a_{perturbed_tensor_name}", f"b_{perturbed_tensor_name}"],
-                                name=f"gen_eggroll_noise_{perturbed_tensor_name}",
-                                domain="com.microsoft"
+                            noise_node_a = helper.make_node(
+                                "PerturbEggroll",
+                                inputs=[f"shape_{input_name}"],
+                                outputs=[f"a_{perturbed_tensor_name}"],
+                                name=f"gen_eggroll_noise_a_{perturbed_tensor_name}",
+                                seed=seed,
+                                idx=perturbation_counter,
+                                domain="com.microsoft",
+                                doc_string="a = RandomRademacher(x[0], seed)"
+                            )
+                            
+                            noise_node_b = helper.make_node(
+                                "PerturbEggroll",
+                                inputs=[f"shape_{input_name}"],
+                                outputs=[f"b_{perturbed_tensor_name}"],
+                                name=f"gen_eggroll_noise_b_{perturbed_tensor_name}",
+                                seed=seed,
+                                idx=perturbation_counter,
+                                domain="com.microsoft",
+                                doc_string="b = RandomRademacher(x[1:], seed)"
                             )
 
                             gemm_node = helper.make_node(
                                 "Gemm",
-                                inputs=[f"a_{perturbed_tensor_name}", f"b_{perturbed_tensor_name}", input_name],
-                                outputs=[perturbed_tensor_name],
+                                inputs=[f"a_{perturbed_tensor_name}", f"b_{perturbed_tensor_name}", eggroll_input],
+                                outputs=[eggroll_output],
                                 name=f"eggroll_gemm_{perturbed_tensor_name}",
                                 transA=0,
                                 transB=1,
                                 alpha=epsilon,
                                 beta=0
                             )
-                        
-                            new_nodes.append(noise_node)
+
+                            new_nodes.append(noise_node_a)
+                            new_nodes.append(noise_node_b)
                             new_nodes.append(gemm_node)
 
                         # **CRITICAL**: annotate perturbed edge with same dtype/shape as weight
@@ -304,7 +357,7 @@ def append_cross_entropy_loss(onnx_path, output_path, label_name='y', logits_out
     if logits_output_idx < 0 or logits_output_idx >= len(graph.output):
         raise RuntimeError(f"Invalid logits_output_idx {logits_output_idx}")
     logits_name = graph.output[logits_output_idx].name
-    
+
     existing_inputs = {inp.name for inp in graph.input}
     label_input_name = label_name
     suffix = 0
