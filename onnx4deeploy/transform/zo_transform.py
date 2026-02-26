@@ -175,9 +175,17 @@ def inject_perturbation_nodes(
                             # Shape annotation for intermediate outputs
                             a_shape = [noise_shape[0], 1]
                             b_shape = [int(np.prod(noise_shape[1:])), 1]
+                               
+                            shape_a_tensor = helper.make_tensor(name=f"shape_a_{input_name}", data_type=TensorProto.INT64, dims=[len(a_shape)],
+                                                                    vals=np.array(a_shape, dtype=np.int64))
+                            shape_b_tensor = helper.make_tensor(name=f"shape_b_{input_name}", data_type=TensorProto.INT64, dims=[len(b_shape)],
+                                                                    vals=np.array(b_shape, dtype=np.int64))
+                            
                             shape_input_name = helper.make_tensor(name=f"shape_{input_name}", data_type=TensorProto.INT64, dims=[len(noise_shape)],
                                                 vals=np.array(noise_shape, dtype=np.int64))
                             new_initializers.append(shape_input_name)
+                            new_initializers.append(shape_a_tensor)
+                            new_initializers.append(shape_b_tensor)
 
                             if len(noise_shape) > 2:
 
@@ -224,7 +232,7 @@ def inject_perturbation_nodes(
                             # Eggroll noise node (without loss_grad input)
                             noise_node_a = helper.make_node(
                                 "PerturbEggroll",
-                                inputs=[f"shape_{input_name}"],
+                                inputs=[f"shape_a_{input_name}"],
                                 outputs=[f"a_{perturbed_tensor_name}"],
                                 name=f"gen_eggroll_noise_a_{perturbed_tensor_name}",
                                 seed=seed,
@@ -235,7 +243,7 @@ def inject_perturbation_nodes(
                             
                             noise_node_b = helper.make_node(
                                 "PerturbEggroll",
-                                inputs=[f"shape_{input_name}"],
+                                inputs=[f"shape_b_{input_name}"],
                                 outputs=[f"b_{perturbed_tensor_name}"],
                                 name=f"gen_eggroll_noise_b_{perturbed_tensor_name}",
                                 seed=seed,

@@ -61,6 +61,11 @@ class PerturbEggrollOperatorTest(BaseOperatorTest):
         b_tensor = helper.make_tensor_value_info(
             "b", TensorProto.FLOAT, b_shape
         )
+        
+        shape_a_tensor = helper.make_tensor(name=f"shape_a", data_type=TensorProto.INT64, dims=[len(a_shape)],
+                                                vals=np.array(a_shape, dtype=np.int64))
+        shape_b_tensor = helper.make_tensor(name=f"shape_b", data_type=TensorProto.INT64, dims=[len(b_shape)],
+                                                vals=np.array(b_shape, dtype=np.int64))
 
         shape_input_name = helper.make_tensor(name=f"shape_x", data_type=TensorProto.INT64, dims=[len(self.input_shape)],
                                                 vals=np.array(self.input_shape, dtype=np.int64))
@@ -99,7 +104,7 @@ class PerturbEggrollOperatorTest(BaseOperatorTest):
         # Eggroll noise node (without loss_grad input)
         noise_node_a = helper.make_node(
             "PerturbEggroll",
-            inputs=["shape_x"],
+            inputs=["shape_a"],
             outputs=["a"],
             name=f"gen_eggroll_noise_a",
             seed=13,
@@ -110,7 +115,7 @@ class PerturbEggrollOperatorTest(BaseOperatorTest):
         
         noise_node_b = helper.make_node(
             "PerturbEggroll",
-            inputs=["shape_x"],
+            inputs=["shape_b"],
             outputs=["b"],
             name=f"gen_eggroll_noise_b",
             seed=14,
@@ -136,7 +141,10 @@ class PerturbEggrollOperatorTest(BaseOperatorTest):
                 "perturb_eggroll_graph",
                 [x_tensor],
                 [perturbed_x_tensor],
-                [shape_input_name, shape_flat_name],  # <-- shape annotations here
+                [shape_input_name, 
+                 shape_flat_name,
+                 shape_a_tensor,
+                 shape_b_tensor],  # <-- shape annotations here
                 value_info=[a_tensor, b_tensor, 
                             flattened_tensor_name,
                             flattened_perturbed_tensor_name]  # <-- shape annotation here
@@ -147,6 +155,7 @@ class PerturbEggrollOperatorTest(BaseOperatorTest):
                 "perturb_eggroll_graph",
                 [x_tensor],
                 [perturbed_x_tensor],
+                [shape_a_tensor, shape_b_tensor],
                 value_info=[a_tensor, b_tensor]  # <-- shape annotation here
             )
 
