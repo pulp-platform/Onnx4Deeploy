@@ -8,11 +8,9 @@ from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
-import onnx
 import torch
 
 from ..core.base_exporter import BaseONNXExporter
-from ..optimization import remove_identity_nodes
 from ..transform.model_transform import randomize_layernorm_params
 
 # Import CCT PyTorch models from new location
@@ -283,129 +281,11 @@ class CCTExporter(BaseONNXExporter):
 
         return pipeline
 
-    def run_training_optimization(self, onnx_file: str, output_file: str):
-        """
-        Run ONNX optimizations for CCT training mode.
-
-        Training-specific optimizations:
-        - Fold frozen parameters into ONNX initializers (constants)
-        - Shape inference for training graph
-        - Identity node removal
-
-        ORT's generate_artifacts() exposes ALL parameters (frozen + trainable) as
-        graph inputs. Deeploy's NCHW→NHWC layout-conversion pass requires Conv weights
-        to be gs.Constant (ONNX initializer), not gs.Variable (graph input). This pass
-        folds frozen params (those without a _grad.accumulation.buffer counterpart) back
-        into ONNX initializers using their initial values from network_infer.onnx.
-
-        Args:
-            onnx_file: Path to input ONNX file
-            output_file: Path to save optimized ONNX file
-        """
-
-        print("🔧 Running CCT-specific training optimizations...")
-
-        # Load training model and inference model (for initial frozen param values).
-        model = onnx.load(onnx_file)
-        infer_model = onnx.load(self.paths["network_infer"])
-        init_map = {init.name: init for init in infer_model.graph.initializer}
-
-        # Detect trainable param names: those with a _grad.accumulation.buffer input.
-        _GRAD_ACC = "_grad.accumulation.buffer"
-        input_names = {inp.name for inp in model.graph.input}
-        trainable_names = set()
-        for inp_name in input_names:
-            if _GRAD_ACC in inp_name:
-                param_name = inp_name[: -len(_GRAD_ACC)]
-                trainable_names.add(param_name)
-
-        # Fold frozen params back into ONNX initializers.
-        # Frozen = float32 graph inputs that are not:
-        #   - data inputs (no initial value in infer model)
-        #   - trainable params (have a grad_acc_buf counterpart)
-        #   - grad acc buffers (_grad.accumulation.buffer suffix)
-        #   - lazy_reset_grad (bool)
-        #   - labels (int64)
-        graph_inputs_to_keep = []
-        frozen_folded = 0
-        for inp in model.graph.input:
-            name = inp.name
-            elem_type = inp.type.tensor_type.elem_type if inp.type.HasField("tensor_type") else 0
-            is_grad_acc = _GRAD_ACC in name
-            is_trainable = name in trainable_names
-            is_bool = elem_type == 9  # TensorProto.BOOL
-            is_int = elem_type == 7  # TensorProto.INT64
-
-            if is_grad_acc or is_trainable or is_bool or is_int:
-                graph_inputs_to_keep.append(inp)
-            elif name in init_map:
-                # Fold as constant initializer (frozen param with known initial value).
-                model.graph.initializer.append(init_map[name])
-                frozen_folded += 1
-            else:
-                # Data input (image) — no initial value, must stay as graph input.
-                graph_inputs_to_keep.append(inp)
-
-        del model.graph.input[:]
-        model.graph.input.extend(graph_inputs_to_keep)
-        print(
-            f"  ➤ Folded {frozen_folded} frozen params into graph constants "
-            f"(kept {len(graph_inputs_to_keep)} explicit inputs)"
-        )
-
-        # 1. Unfuse BiasGelu → Add + Gelu
-        # ORT's generate_artifacts() fuses Add(x, bias) + Gelu into BiasGelu.
-        # Deeploy has no BiasGelu mapping but supports separate Add and Gelu ops.
-        # Transform: BiasGelu(x, bias) → intermediate = Add(x, bias); Gelu(intermediate)
-        import onnx_graphsurgeon as gs
-
-        gs_model = gs.import_onnx(model)
-        bias_gelu_nodes = [n for n in gs_model.nodes if n.op == "BiasGelu"]
-        if bias_gelu_nodes:
-            print(f"  ➤ Unfusing {len(bias_gelu_nodes)} BiasGelu node(s) → Add + Gelu...")
-            for node in bias_gelu_nodes:
-                x_in, bias_in = node.inputs[0], node.inputs[1]
-                gelu_out = node.outputs[0]
-                add_out = gs.Variable(
-                    name=node.name + "_add_out",
-                    dtype=gelu_out.dtype,
-                    shape=gelu_out.shape,
-                )
-                add_node = gs.Node(
-                    op="Add",
-                    name=node.name + "_add",
-                    inputs=[x_in, bias_in],
-                    outputs=[add_out],
-                )
-                gelu_node = gs.Node(
-                    op="Gelu",
-                    name=node.name + "_gelu",
-                    inputs=[add_out],
-                    outputs=[gelu_out],
-                )
-                gs_model.nodes.append(add_node)
-                gs_model.nodes.append(gelu_node)
-                node.inputs.clear()
-                node.outputs.clear()
-            gs_model.cleanup().toposort()
-            model = gs.export_onnx(gs_model)
-            print(f"  ✔ BiasGelu unfused successfully")
-
-        # 2. Shape inference
-        print("  ➤ Shape inference for training graph...")
-        try:
-            model = onnx.shape_inference.infer_shapes(model)
-        except Exception as e:
-            print(f"    Warning: Shape inference failed (expected for training): {e}")
-
-        # Save intermediate result
-        onnx.save(model, output_file)
-
-        # 2. Remove identity nodes
-        print("  ➤ Removing identity nodes...")
-        remove_identity_nodes(output_file, output_file)
-
-        print("  ✅ Training optimization complete")
+    # run_training_optimization() is intentionally NOT overridden here.
+    # The base class implementation calls run_train_onnx_optimization() which runs
+    # the full 18-pass standard pipeline — including frozen-param folding,
+    # BiasGelu unfusion, SCELossGrad 3→2 input, ReduceSum axes→attribute, etc.
+    # This is the same approach used by SleepConViT.
 
     def save_test_data(self, model: torch.nn.Module, save_dir: str):
         """

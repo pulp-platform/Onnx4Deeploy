@@ -55,6 +55,10 @@ class SimpleMlpExporter(BaseONNXExporter):
             "dataset": "random",  # "random" | "mnist"
             "data_path": None,  # path for dataset files (None → auto-download)
             "data_split": "train",  # "train" | "test" (for MNIST)
+            # data_size: None → streaming (each batch = new random images, no repeat)
+            #            N   → epoch cycling (fixed pool of N images, repeated with shuffle)
+            #            Set N << n_batches to observe loss descent.
+            "data_size": None,
         }
 
         # Apply any CLI overrides stored before export_training() was called.
@@ -169,6 +173,7 @@ class SimpleMlpExporter(BaseONNXExporter):
             return MNISTDataSource(
                 data_path=cfg.get("data_path", None),
                 split=cfg.get("data_split", "train"),
+                data_size=cfg.get("data_size", None),
             )
         from ..data.random_datasource import RandomDataSource
 
@@ -266,7 +271,12 @@ class SimpleMlpExporter(BaseONNXExporter):
         if n_accum is None:
             n_accum = int(self.config.get("n_accum", 1))
         if n_batches % n_accum != 0:
-            raise ValueError(f"n_batches={n_batches} must be divisible by n_accum={n_accum}")
+            n_batches = (n_batches // n_accum) * n_accum
+            if n_batches == 0:
+                n_batches = n_accum
+            print(
+                f"   ⚠️  n_batches adjusted to {n_batches} (must be divisible by n_accum={n_accum})"
+            )
         n_steps = n_batches // n_accum
 
         save_dir = Path(self.paths["output_dir"])

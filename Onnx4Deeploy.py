@@ -278,11 +278,14 @@ def generate_model(
     model_name: str,
     mode: str,
     output_path: Optional[str] = None,
-    n_batches: int = 4,
+    n_batches: Optional[int] = None,
+    n_steps: Optional[int] = None,
+    n_epochs: Optional[float] = None,
     n_accum: int = 1,
     batch_size: int = 1,
     dataset: str = "random",
     data_path: Optional[str] = None,
+    data_size: Optional[int] = None,
 ):
     """Generate model ONNX"""
     print(f"\n{'='*70}")
@@ -318,6 +321,33 @@ def generate_model(
         # Create exporter
         exporter = model_class(save_path=output_path)
 
+        # Resolve n_batches from whichever training-length parameter was given.
+        # Priority: --n-batches > --n-steps > --n-epochs > default(4)
+        if mode == "train":
+            import math
+
+            if n_batches is not None:
+                # explicit --n-batches: use as-is (auto-rounded in create_training_test_data)
+                pass
+            elif n_steps is not None:
+                # --n-steps S  →  n_batches = S × n_accum
+                n_batches = n_steps * n_accum
+                print(f"📐 --n-steps {n_steps}  × --n-accum {n_accum}  → n_batches={n_batches}")
+            elif n_epochs is not None:
+                # --n-epochs E  →  n_batches = ceil(E × data_size / n_accum) × n_accum
+                if data_size is None:
+                    print("❌ --n-epochs requires --data-size to be set")
+                    sys.exit(1)
+                total_samples = n_epochs * data_size
+                n_batches = math.ceil(total_samples / n_accum) * n_accum
+                actual_epochs = n_batches / data_size
+                print(
+                    f"📐 --n-epochs {n_epochs}  × data_size {data_size}  ÷ --n-accum {n_accum}"
+                    f"  → n_batches={n_batches}  (≈{actual_epochs:.1f} epochs)"
+                )
+            else:
+                n_batches = 4  # default
+
         # Store CLI overrides that must survive the internal load_config() call
         # inside export_training().  Exporters that support _config_overrides
         # will apply these at the end of their load_config() implementation.
@@ -330,6 +360,8 @@ def generate_model(
         exporter._config_overrides["dataset"] = dataset
         if data_path is not None:
             exporter._config_overrides["data_path"] = data_path
+        if data_size is not None:
+            exporter._config_overrides["data_size"] = data_size
 
         # Apply model-specific configuration if available
         if "config" in models[model_key]:
@@ -477,15 +509,36 @@ Examples:
     )
 
     # Training-specific options
-    parser.add_argument(
+    train_len_group = parser.add_mutually_exclusive_group()
+    train_len_group.add_argument(
+        "--n-epochs",
+        type=float,
+        default=None,
+        dest="n_epochs",
+        metavar="E",
+        help="(train mode) Number of full passes over the data pool. "
+        "Requires --data-size. n_batches = ceil(E × data_size / n_accum) × n_accum. "
+        "Example: --data-size 20 --n-accum 8 --n-epochs 25 → n_batches=504.",
+    )
+    train_len_group.add_argument(
+        "--n-steps",
+        type=int,
+        default=None,
+        dest="n_steps",
+        metavar="S",
+        help="(train mode) Number of SGD weight-update steps. "
+        "n_batches = S × n_accum. "
+        "Example: --n-steps 63 --n-accum 8 → n_batches=504.",
+    )
+    train_len_group.add_argument(
         "--n-batches",
         type=int,
-        default=4,
+        default=None,
         dest="n_batches",
         metavar="N",
-        help="(train mode) Number of distinct mini-batch samples to generate in "
-        "inputs.npz (arr_0000…arr_M-1 for mb 0, plus mb1_arr_* … mbN-1_arr_* "
-        "for additional batches). Default: 4.",
+        help="(train mode) Total forward-pass count (low-level, backward-compat). "
+        "Auto-rounded down to nearest multiple of n_accum if not divisible. "
+        "Prefer --n-epochs or --n-steps for clearer semantics.",
     )
     parser.add_argument(
         "--n-accum",
@@ -493,9 +546,8 @@ Examples:
         default=1,
         dest="n_accum",
         metavar="N",
-        help="(train mode) Number of mini-batches to accumulate per SGD update step "
-        "(gradient accumulation). n_batches must be divisible by n_accum. "
-        "Default: 1 (no accumulation).",
+        help="(train mode) Effective batch size: number of samples accumulated "
+        "per SGD update (gradient accumulation). Default: 1.",
     )
     parser.add_argument(
         "--batch-size",
@@ -523,6 +575,18 @@ Examples:
         metavar="PATH",
         help="Root directory for dataset files (used with --dataset mnist). "
         "Default: /tmp/mnist.",
+    )
+    parser.add_argument(
+        "--data-size",
+        type=int,
+        default=None,
+        dest="data_size",
+        metavar="N",
+        help="(mnist) Fixed pool size for epoch-cycling mode. "
+        "None (default): each batch draws fresh random images — no loss descent visible. "
+        "N: fix a pool of N images and cycle through them with per-epoch shuffle — "
+        "loss descends as the network repeatedly sees the same images. "
+        "Rule of thumb: set --n-batches to at least 4×N for visible convergence.",
     )
 
     # Other options
@@ -575,10 +639,13 @@ Examples:
             args.mode,
             args.output,
             n_batches=args.n_batches,
+            n_steps=args.n_steps,
+            n_epochs=args.n_epochs,
             n_accum=args.n_accum,
             batch_size=args.batch_size,
             dataset=args.dataset,
             data_path=args.data_path,
+            data_size=args.data_size,
         )
 
 

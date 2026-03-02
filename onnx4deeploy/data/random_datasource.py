@@ -21,11 +21,12 @@ class RandomDataSource(DataSource):
         num_classes: int,
         seed: int = 42,
     ) -> Tuple[List[np.ndarray], List[np.ndarray]]:
-        np.random.seed(seed)
+        # Use a local RandomState so we do NOT touch the global numpy seed.
+        rng = np.random.RandomState(seed)
         batch_size = input_shape[0]
-        inputs = [np.random.randn(*input_shape).astype(np.float32) for _ in range(n_batches)]
+        inputs = [rng.randn(*input_shape).astype(np.float32) for _ in range(n_batches)]
         labels = [
-            np.random.randint(0, num_classes, size=(batch_size,)).astype(np.int64)
+            rng.randint(0, num_classes, size=(batch_size,)).astype(np.int64)
             for _ in range(n_batches)
         ]
         return inputs, labels
