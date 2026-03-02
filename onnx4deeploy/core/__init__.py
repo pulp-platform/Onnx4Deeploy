@@ -17,11 +17,15 @@ from .onnx_utils import (
     randomize_onnx_initializers,
     setup_output_paths,
 )
+from .optimizer_onnx import create_optimizer_onnx, derive_optimizer_dir
 
 __all__ = [
     # Base classes
     "BaseONNXExporter",
     "ExportMode",
+    # Optimizer ONNX generation
+    "create_optimizer_onnx",
+    "derive_optimizer_dir",
     # Utility functions
     "load_train_config",
     "create_test_input_output",

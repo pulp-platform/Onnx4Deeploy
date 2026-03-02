@@ -23,6 +23,8 @@ import sys
 from pathlib import Path
 from typing import Optional
 
+from onnx4deeploy.core.optimizer_onnx import create_optimizer_onnx, derive_optimizer_dir
+
 # Add project root to path
 project_root = Path(__file__).parent
 sys.path.insert(0, str(project_root))
@@ -375,6 +377,23 @@ def generate_model(
         elif mode == "train":
             onnx_file = exporter.export_training()
             mode_desc = "Training mode"
+
+            # Auto-generate the optimizer ONNX alongside the training ONNX.
+            # Convention: <base>/<model>_train → <base>/<model>_optimizer/network.onnx
+            opt_dir = derive_optimizer_dir(output_path)
+            if opt_dir is not None:
+                lr = (
+                    float(exporter.config.get("learning_rate", 0.001)) if exporter.config else 0.001
+                )
+                print(f"\n⚙️  Generating optimizer ONNX (lr={lr}) → {opt_dir}/")
+                try:
+                    create_optimizer_onnx(
+                        train_dir=output_path,
+                        output_path=str(Path(opt_dir) / "network.onnx"),
+                        lr=lr,
+                    )
+                except Exception as _opt_err:
+                    print(f"  ⚠️  Optimizer ONNX generation skipped: {_opt_err}")
         else:
             print(f"❌ Unknown mode: {mode}")
             print("   Available modes: infer, train")
@@ -391,6 +410,19 @@ def generate_model(
         files_to_check = ["network.onnx", "inputs.npz", "outputs.npz"]
         if mode == "train":
             files_to_check.extend(["network_train.onnx", "optimizer_model.onnx"])
+            # Also show the optimizer ONNX written to the sibling _optimizer directory.
+            opt_dir = derive_optimizer_dir(output_path)
+            if opt_dir is not None:
+                opt_onnx = Path(opt_dir) / "network.onnx"
+                if opt_onnx.exists():
+                    size = opt_onnx.stat().st_size / 1024
+                    size_str = f"{size:.1f} KB" if size < 1024 else f"{size/1024:.1f} MB"
+                    rel = str(
+                        opt_onnx.relative_to(output_dir.parent)
+                        if output_dir.parent in opt_onnx.parents
+                        else opt_onnx
+                    )
+                    print(f"  ✓ {'optimizer/network.onnx':<25} ({size_str})  [{rel}]")
 
         for file in files_to_check:
             file_path = output_dir / file
