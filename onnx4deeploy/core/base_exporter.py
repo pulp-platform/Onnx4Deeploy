@@ -22,10 +22,9 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import onnx
 import torch
-from onnx import helper
 from onnxruntime.training import artifacts
 
-from .onnx_utils import print_model_info, randomize_onnx_initializers
+from .onnx_utils import print_model_info
 
 
 class ExportMode(Enum):
@@ -136,6 +135,18 @@ class BaseONNXExporter(ABC):
 
         return create_inference_pipeline()
 
+    def get_data_source(self) -> "DataSource":
+        """
+        Return the data source used to generate (input, label) pairs for
+        create_training_test_data().
+
+        Default: RandomDataSource (preserves original behaviour).
+        Override in subclasses to use real datasets (e.g. MNISTDataSource).
+        """
+        from ..data.random_datasource import RandomDataSource
+
+        return RandomDataSource()
+
     def get_training_pipeline(self) -> "OptimizationPipeline":
         """
         Get the optimization pipeline for training mode.
@@ -148,6 +159,20 @@ class BaseONNXExporter(ABC):
         from .optimization_passes import create_training_pipeline
 
         return create_training_pipeline()
+
+    def run_training_optimization(self, onnx_file: str, output_file: str):
+        """
+        Run ONNX optimizations for training mode.
+
+        Args:
+            onnx_file: Path to input training ONNX file
+            output_file: Path to save optimized ONNX file
+        """
+        from ..optimization.train_optimizer import run_train_onnx_optimization
+
+        # Pass the inference model so frozen params can be sourced from its initializers.
+        infer_file = self.paths.get("network_infer") if self.paths else None
+        run_train_onnx_optimization(onnx_file, output_file, onnx_infer_file=infer_file)
 
     def run_inference_optimization(self, onnx_file: str, output_file: str):
         """
@@ -170,30 +195,6 @@ class BaseONNXExporter(ABC):
         """
         # Get the optimization pipeline for this model
         pipeline = self.get_inference_pipeline()
-
-        # Copy to output if different files
-        if onnx_file != output_file:
-            shutil.copy(onnx_file, output_file)
-
-        # Run the pipeline
-        try:
-            pipeline.run(output_file, output_file)
-        except Exception as e:
-            print(f"   ⚠️  Pipeline execution failed: {e}")
-
-    def run_training_optimization(self, onnx_file: str, output_file: str):
-        """
-        Run ONNX optimizations for training mode using optimization pipeline.
-
-        Default: uses comprehensive training optimization pipeline from train_optimizer.
-        Subclasses can override get_training_pipeline() for model-specific optimizations.
-
-        Args:
-            onnx_file: Path to input ONNX file
-            output_file: Path to save optimized ONNX file
-        """
-        # Get the optimization pipeline for this model
-        pipeline = self.get_training_pipeline()
 
         # Copy to output if different files
         if onnx_file != output_file:
@@ -265,7 +266,11 @@ class BaseONNXExporter(ABC):
         return ""
 
     def _export_to_onnx(
-        self, model: torch.nn.Module, input_tensor: torch.Tensor, opset_version: int = 12
+        self,
+        model: torch.nn.Module,
+        input_tensor: torch.Tensor,
+        opset_version: int = 12,
+        training_mode: bool = False,
     ) -> onnx.ModelProto:
         """
         Export PyTorch model to ONNX.
@@ -274,11 +279,48 @@ class BaseONNXExporter(ABC):
             model: PyTorch model
             input_tensor: Sample input tensor
             opset_version: ONNX opset version
+            training_mode: If True, export with TrainingMode.TRAINING so that ops like
+                LayerNorm, Dropout, and BatchNorm are exported with their training-specific
+                outputs (e.g. saved_mean / inv_std_var for LayerNorm).  These intermediate
+                values are required by ORT's gradient builders and are *not* present in a
+                default (eval-mode) ONNX export.
 
         Returns:
             ONNX model
         """
         f = io.BytesIO()
+        export_training = (
+            torch.onnx.TrainingMode.TRAINING if training_mode else torch.onnx.TrainingMode.EVAL
+        )
+
+        # For opset ≥ 17, LayerNormalization is a standard ONNX op, so PyTorch exports it
+        # with only 1 output (Y).  ORT's gradient builder needs O(1)=mean and O(2)=inv_std_var.
+        # Fix: override aten::layer_norm to declare outputs=3.  The extra two outputs are
+        # "dangling" in the forward graph but ORT preserves them through get_optimized_model()
+        # and stashes them for LayerNormalizationGrad.
+        # For opset ≤ 16, PyTorch decomposes LayerNorm to individual ops and ORT's
+        # LayerNormFusion re-creates the node with 3 outputs automatically — no override needed.
+        if training_mode and opset_version >= 17:
+            from torch.onnx import symbolic_helper
+
+            @symbolic_helper.parse_args("v", "is", "v", "v", "f", "i")
+            def _layer_norm_training(g, input, normalized_shape, weight, bias, eps, cudnn_enable):
+                y, _mean, _inv_std = g.op(
+                    "LayerNormalization",
+                    input,
+                    weight,
+                    bias,
+                    outputs=3,
+                    axis_i=-len(normalized_shape),
+                    epsilon_f=eps,
+                    stash_type_i=1,
+                )
+                return y
+
+            torch.onnx.register_custom_op_symbolic(
+                "aten::layer_norm", _layer_norm_training, opset_version=opset_version
+            )
+
         torch.onnx.export(
             model,
             input_tensor,
@@ -286,9 +328,10 @@ class BaseONNXExporter(ABC):
             input_names=["input"],
             output_names=["output"],
             opset_version=opset_version,
-            do_constant_folding=True,  # Enable constant folding for cleaner graphs
+            do_constant_folding=not training_mode,
             export_params=True,
             keep_initializers_as_inputs=False,
+            training=export_training,
         )
 
         onnx_model = onnx.load_model_from_string(f.getvalue())
@@ -382,40 +425,52 @@ class BaseONNXExporter(ABC):
         print(f"🚀 Exporting {self.get_model_name()} to ONNX (Training Mode)")
         print(f"{'='*60}\n")
 
-        # Create PyTorch model
         print("📦 Creating PyTorch model...")
         model = self.create_model()
-        model.train()  # Training mode
-
-        # Store model for test data generation
+        model.train()  # training=TrainingMode.TRAINING export requires train() mode
         self._model = model
 
-        # Generate input
         input_shape = self.get_input_shape()
         input_tensor = torch.randn(*input_shape, dtype=torch.float32)
         print(f"   Input shape: {input_shape}")
 
-        # Export to ONNX
-        print("\n📤 Exporting to ONNX...")
-        opset_version = self.config.get("opset_version", 12)
-        onnx_model = self._export_to_onnx(model, input_tensor, opset_version)
-
-        # Randomize initializers for testing
-        onnx_model = randomize_onnx_initializers(onnx_model)
-
-        # Save inference model
+        # ort-training ≥ 1.14 requires opset ≥ 13.
+        # In opset 13 the Squeeze/Unsqueeze 'axes' became an input tensor (not an
+        # attribute).  Any pass that converts axes back to an attribute must NOT
+        # run before generate_artifacts.
+        opset_version = max(self.config.get("opset_version", 13), 13)
+        print(f"\n📤 Exporting to ONNX (opset {opset_version}, training mode)...")
+        onnx_model = self._export_to_onnx(model, input_tensor, opset_version, training_mode=True)
         onnx.save(onnx_model, self.paths["network_infer"])
         print(f"✅ Inference ONNX saved: {self.paths['network_infer']}")
 
-        # Run inference optimizations
+        # Run inference optimizations.
+        # Set _for_training=True so subclasses (e.g. SleepConViTExporter) can skip
+        # ORT transformer fusion, which creates com.microsoft custom ops that are
+        # incompatible with generate_artifacts' internal ONNX shape inference.
         print("\n🔧 Running inference optimizations...")
-        self.run_inference_optimization(self.paths["network_infer"], self.paths["network_infer"])
+        self._for_training = True
+        try:
+            self.run_inference_optimization(
+                self.paths["network_infer"], self.paths["network_infer"]
+            )
+        finally:
+            self._for_training = False
 
-        # Reload optimized model
+        # Reload and validate before passing to generate_artifacts.
+        # generate_artifacts calls onnx.checker.check_model(model, True) internally,
+        # so an invalid model raises here with a clear error message.
         onnx_model = onnx.load(self.paths["network_infer"])
+        try:
+            onnx.checker.check_model(onnx_model)
+            print("✅ Model validation passed")
+        except Exception as e:
+            raise RuntimeError(
+                f"Model failed ONNX validation before generate_artifacts: {e}"
+            ) from e
         print_model_info(self.paths["network_infer"])
 
-        # Get trainable parameters
+        # Determine trainable / frozen parameters
         all_param_names = [init.name for init in onnx_model.graph.initializer]
         requires_grad = self.get_trainable_params(all_param_names)
         frozen_params = [name for name in all_param_names if name not in requires_grad]
@@ -423,7 +478,12 @@ class BaseONNXExporter(ABC):
         print(f"\n🔹 Trainable parameters: {len(requires_grad)}")
         print(f"🔹 Frozen parameters: {len(frozen_params)}")
 
-        # Generate training artifacts
+        # Generate training artifacts.
+        # Produces inside artifact_directory:
+        #   training_model.onnx  — forward + loss + backward graph
+        #   eval_model.onnx      — forward + loss (no gradients)
+        #   optimizer_model.onnx — SGD parameter-update graph
+        #   checkpoint/          — initial parameter values
         print("\n🏋️ Generating training artifacts...")
         artifacts.generate_artifacts(
             onnx_model,
@@ -434,94 +494,249 @@ class BaseONNXExporter(ABC):
             artifact_directory=self.paths["output_dir"],
         )
 
-        # Rename training_model.onnx to network_train.onnx
-        training_model_path = os.path.join(self.paths["output_dir"], "training_model.onnx")
-        if os.path.exists(training_model_path):
-            os.rename(training_model_path, self.paths["network_train"])
-            print(f"✅ Training model saved: {self.paths['network_train']}")
+        # Rename default artifact name → project convention
+        training_model_src = os.path.join(self.paths["output_dir"], "training_model.onnx")
+        if not os.path.exists(training_model_src):
+            raise RuntimeError(f"generate_artifacts did not produce: {training_model_src}")
+        os.rename(training_model_src, self.paths["network_train"])
+        print(f"✅ Training model: {self.paths['network_train']}")
 
-        # Load training model and add gradient outputs
-        onnx_model = onnx.load(self.paths["network_train"])
-        graph = onnx_model.graph
-        grad_tensor_names = [name + "_grad" for name in requires_grad]
+        # Run training-specific optimizations.
+        # convert_squeeze_unsqueeze_input_to_attr (and other Deeploy transforms)
+        # are applied here — AFTER generate_artifacts — so ORT validation is done.
+        print("\n🔧 Running training optimizations...")
+        self.run_training_optimization(
+            self.paths["network_train"], self.paths["network_train_optim"]
+        )
 
-        for grad_name in grad_tensor_names:
-            if not any(output.name == grad_name for output in graph.output):
-                grad_output = helper.make_tensor_value_info(grad_name, onnx.TensorProto.FLOAT, None)
-                graph.output.append(grad_output)
-
-        # Save with gradient outputs
-        onnx.save(onnx_model, self.paths["network_train_optim"])
-        onnx.save(onnx_model, self.paths["network_train"])
-
-        # Run shape inference for training model (handles Microsoft custom ops)
-        print("\n🔍 Running shape inference...")
+        print("\n🔍 Running shape inference on training model...")
         from ..optimization.shape_optimizer import infer_shapes_with_custom_ops
 
         infer_shapes_with_custom_ops(
             self.paths["network_train_optim"], self.paths["network_train_optim"]
         )
 
-        # Run training-specific optimizations
-        print("\n🔧 Running training optimizations...")
-        self.run_training_optimization(self.paths["network_train_optim"], self.paths["network"])
+        # Final model = Deeploy-optimized training model
+        shutil.copy(self.paths["network_train_optim"], self.paths["network"])
+        print(f"✅ Final model: {self.paths['network']}")
 
-        # Save pre-SGD model
-        shutil.copy(self.paths["network"], self.paths["network_pre_sgd"])
-        print(f"✅ Pre-SGD model saved: {self.paths['network_pre_sgd']}")
-
-        # Create test input/output
+        # Generate reference test input/output via ORT on-device training API
         print("\n🧪 Creating test input/output...")
-        self._create_test_data()
-
-        # Add optimizer (SGD) nodes
-        print("\n➕ Adding SGD optimizer nodes...")
-        self._add_optimizer_nodes()
+        self.create_training_test_data()
 
         print(f"\n{'='*60}")
         print("✅ Export Complete!")
-        print(f"   Final model: {self.paths['network']}")
+        print(f"   Training model:  {self.paths['network_train']}")
+        print(f"   Final model:     {self.paths['network']}")
+        print(f"   Output dir:      {self.paths['output_dir']}")
         print(f"{'='*60}\n")
 
         return self.paths["network"]
 
-    def _create_test_data(self):
+    def create_training_test_data(self) -> None:
         """
-        Create test input/output data for training.
+        Generate reference test data for one complete training step.
 
-        Uses ONNX Runtime to generate reference output from the (potentially randomized) ONNX model.
-        This ensures test data matches the actual ONNX model weights.
+        Uses ORT's InferenceSession to run the training model with ALL graph inputs
+        (data input + labels + all initial weight/bias parameters), then applies
+        SGD manually to compute updated parameter values.
+
+        Initial parameter values are read from network_infer.onnx initializers,
+        which exactly match the checkpoint values produced by generate_artifacts.
+
+        Saved files
+        -----------
+        inputs.npz  : {<input_name>: float32, <labels_name>: int64,
+                       <param_name>: float32, ...}   ← ALL graph inputs
+        outputs.npz : {<param_name>: float32, ..., loss: float32}
+                       param tensors  — updated via SGD (param - lr * grad)
+                       loss           — scalar cross-entropy loss
         """
-        # Generate test data using ONNX Runtime
+        from pathlib import Path
+
+        import numpy as np
+        import onnx
+        import onnxruntime as ort
+        from onnx import numpy_helper
+
         try:
-            from pathlib import Path
-
-            import numpy as np
-            import onnxruntime as ort
-
-            print("💾 Generating test input/output data from ONNX model...")
-
-            # Create test input
             input_shape = self.get_input_shape()
-            test_input = np.random.randn(*input_shape).astype(np.float32)
+            input_shape[0]
+            num_classes = self.config.get("num_classes", 2)
+            learning_rate = float(self.config.get("learning_rate", 0.001))
 
-            # Run ONNX inference to get output
-            session = ort.InferenceSession(self.paths["network_infer"])
-            input_name = session.get_inputs()[0].name
-            test_output = session.run(None, {input_name: test_input})[0]
+            data_source = self.get_data_source()
+            _inputs, _labels = data_source.load_batches(1, input_shape, num_classes, seed=42)
+            test_input = _inputs[0]
+            labels = _labels[0]
 
-            # Save as .npz files
-            save_path = Path(self.paths["output_dir"])
-            save_path.mkdir(parents=True, exist_ok=True)
+            save_dir = Path(self.paths["output_dir"])
 
-            np.savez(save_path / "inputs.npz", input=test_input)
-            np.savez(save_path / "outputs.npz", output=test_output)
+            # Read initial parameter values from the inference model.
+            # generate_artifacts uses these initializers as the checkpoint initial state,
+            # so they are guaranteed to match the training model's parameter inputs.
+            infer_model = onnx.load(self.paths["network_infer"])
+            init_map: dict = {
+                init.name: numpy_helper.to_array(init) for init in infer_model.graph.initializer
+            }
 
-            print("  ✅ Saved test data (ONNX reference):")
-            print(f"     Input:  {save_path / 'inputs.npz'} shape={test_input.shape}")
-            print(f"     Output: {save_path / 'outputs.npz'} shape={test_output.shape}")
+            # Run the training model with ORT InferenceSession.
+            # network_train.onnx is pre-optimization and ORT-compatible.
+            session = ort.InferenceSession(
+                self.paths["network_train"], providers=["CPUExecutionProvider"]
+            )
+
+            # Print all graph input names for visibility
+            all_input_names = [inp.name for inp in session.get_inputs()]
+            print(f"   Training model inputs ({len(all_input_names)}): {all_input_names}")
+
+            # Build a complete input feed for every graph input:
+            #   tensor(int64)                -> labels
+            #   tensor(bool)                 -> lazy_reset_grad = True (first step)
+            #   name in init_map             -> initial parameter value
+            #   *_grad.accumulation.buffer   -> zeros (gradient accum buffer init)
+            #   shape == input_shape         -> data input
+            #   anything else                -> zeros with correct shape
+            inputs_dict: dict = {}
+            for inp in session.get_inputs():
+                name = inp.name
+                shape = [d for d in inp.shape if isinstance(d, int) and d > 0]
+                if inp.type == "tensor(int64)":
+                    inputs_dict[name] = labels
+                elif inp.type == "tensor(bool)":
+                    # lazy_reset_grad=True resets accumulator at the start of each step
+                    inputs_dict[name] = np.array([True])
+                elif name in init_map:
+                    inputs_dict[name] = init_map[name]
+                elif "_grad.accumulation.buffer" in name:
+                    # Gradient accumulation buffers are initialized to zero
+                    inputs_dict[name] = np.zeros(shape, dtype=np.float32)
+                elif shape == list(input_shape):
+                    inputs_dict[name] = test_input
+                else:
+                    inputs_dict[name] = np.zeros(shape, dtype=np.float32)
+
+            # Execute forward + backward
+            raw_outputs = session.run(None, inputs_dict)
+            output_names = [o.name for o in session.get_outputs()]
+            outputs_raw = dict(zip(output_names, raw_outputs))
+
+            # Compute updated parameters: updated = param - lr * grad
+            # ORT names gradient outputs as "<param_name>_grad"
+            outputs_dict: dict = {}
+            for param_name, param_val in init_map.items():
+                grad_name = param_name + "_grad"
+                if grad_name in outputs_raw:
+                    outputs_dict[param_name] = param_val - learning_rate * outputs_raw[grad_name]
+
+            # Include scalar loss
+            for out_name, out_val in outputs_raw.items():
+                if "loss" in out_name.lower() and "grad" not in out_name.lower():
+                    outputs_dict["loss"] = np.atleast_1d(np.array(out_val, dtype=np.float32))
+                    break
+
+            if not outputs_dict:
+                # Fallback: save raw outputs if no gradient pattern matched
+                outputs_dict = {k: v for k, v in outputs_raw.items()}
+
+            # Save: inputs include ALL graph inputs (data + labels + all params)
+            np.savez(save_dir / "inputs.npz", **inputs_dict)
+            n_params = sum(1 for k in inputs_dict if k in init_map)
+            print(
+                f"   ✅ inputs.npz  — {len(inputs_dict)} tensors "
+                f"(data + labels + {n_params} params)"
+            )
+
+            np.savez(save_dir / "outputs.npz", **outputs_dict)
+            n_updated = sum(1 for k in outputs_dict if k in init_map)
+            print(
+                f"   ✅ outputs.npz — {len(outputs_dict)} tensors "
+                f"({n_updated} updated params + loss)"
+            )
+
         except Exception as e:
-            print(f"⚠️  Failed to create test data: {e}")
+            print(f"   ⚠️  ORT InferenceSession failed ({e}); using fallback...")
+            self._create_test_data_fallback()
+
+    def _create_test_data_fallback(self) -> None:
+        """
+        Fallback: load initial params from network_train.onnx initializers and
+        save all graph inputs including parameters.
+
+        Saved files
+        -----------
+        inputs.npz  : {<name>: tensor, ...}  — ALL graph inputs including params
+        outputs.npz : {<param_name>: float32, ...}  — updated params or raw outputs
+        """
+        from pathlib import Path
+
+        import numpy as np
+        import onnx
+        import onnxruntime as ort
+        from onnx import numpy_helper
+
+        try:
+            input_shape = self.get_input_shape()
+            input_shape[0]
+            num_classes = self.config.get("num_classes", 2)
+            learning_rate = float(self.config.get("learning_rate", 0.001))
+
+            data_source = self.get_data_source()
+            _inputs, _labels = data_source.load_batches(1, input_shape, num_classes, seed=42)
+            test_input = _inputs[0]
+            labels = _labels[0]
+
+            save_dir = Path(self.paths["output_dir"])
+
+            # Read initial param values from network_train initializers
+            train_model = onnx.load(self.paths["network_train"])
+            init_map = {
+                init.name: numpy_helper.to_array(init) for init in train_model.graph.initializer
+            }
+
+            session = ort.InferenceSession(
+                self.paths["network_train"], providers=["CPUExecutionProvider"]
+            )
+
+            # Build complete input feed including all parameters
+            inputs_dict: dict = {}
+            for inp in session.get_inputs():
+                name = inp.name
+                if inp.type == "tensor(int64)":
+                    inputs_dict[name] = labels
+                elif name in init_map:
+                    inputs_dict[name] = init_map[name]
+                else:
+                    inputs_dict[name] = test_input
+
+            raw_outputs = session.run(None, inputs_dict)
+            output_names = [o.name for o in session.get_outputs()]
+            outputs_raw = dict(zip(output_names, raw_outputs))
+
+            # Apply SGD where gradient outputs are found
+            outputs_dict: dict = {}
+            for param_name, param_val in init_map.items():
+                grad_name = param_name + "_grad"
+                if grad_name in outputs_raw:
+                    outputs_dict[param_name] = param_val - learning_rate * outputs_raw[grad_name]
+
+            for out_name, out_val in outputs_raw.items():
+                if "loss" in out_name.lower() and "grad" not in out_name.lower():
+                    outputs_dict["loss"] = np.atleast_1d(np.array(out_val, dtype=np.float32))
+                    break
+
+            if not outputs_dict:
+                outputs_dict = {k: v for k, v in outputs_raw.items()}
+
+            np.savez(save_dir / "inputs.npz", **inputs_dict)
+            n_params = sum(1 for k in inputs_dict if k in init_map)
+            print(f"   ✅ inputs.npz  — {len(inputs_dict)} tensors ({n_params} params)")
+
+            np.savez(save_dir / "outputs.npz", **outputs_dict)
+            print(f"   ✅ outputs.npz — {len(outputs_dict)} tensors")
+
+        except Exception as e:
+            print(f"   ⚠️  Fallback test data generation failed: {e}")
 
     def _add_optimizer_nodes(self):
         """

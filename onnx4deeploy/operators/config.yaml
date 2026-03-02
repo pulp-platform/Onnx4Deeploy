@@ -32,3 +32,11 @@ concat:
   num_inputs: 3
   axis: 1  # Concatenate along channel dimension
   base_shape: [1, 4, 8, 8]  # NCHW: each input has 4 channels, output will have 12 channels
+
+# InPlaceAccumulatorV2 operator configuration (com.microsoft)
+# Gradient accumulation with lazy reset:
+#   if lazy_reset_grad: out = gradient           (reset)
+#   else:               out = buffer + gradient   (accumulate)
+inplace_accumulator_v2:
+  weight_shape: [128, 784]  # Typical MLP weight shape (hidden_size, input_size)
+  test_reset: true           # true = test reset mode, false = test accumulate mode

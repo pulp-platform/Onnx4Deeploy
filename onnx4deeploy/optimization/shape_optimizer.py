@@ -552,11 +552,26 @@ def register_custom_shape_inference():
                 f"  SoftmaxCrossEntropyGrad shape inference: output shape set from log_prob input"
             )
 
-        # Register the custom shape inference function
+        def inplace_accumulator_v2_shape_inference(ctx):
+            """Shape inference for InPlaceAccumulatorV2 operator.
+
+            Output shape = buffer (input[0]) shape, same as gradient (input[1]).
+            """
+            buffer_type_proto = ctx.get_input_type(0)
+            if buffer_type_proto is None:
+                return
+            ctx.set_output_type(0, buffer_type_proto)
+
+        # Register the custom shape inference functions
         shape_calculator_dict = _get_shape_calculator_dict()
         shape_calculator_dict["com.microsoft.SoftmaxCrossEntropyGrad"] = (
             softmax_cross_entropy_grad_shape_inference
         )
+        shape_calculator_dict["com.microsoft.InPlaceAccumulatorV2"] = (
+            inplace_accumulator_v2_shape_inference
+        )
+        # Also register without domain prefix for models using node.op_type directly
+        shape_calculator_dict["InPlaceAccumulatorV2"] = inplace_accumulator_v2_shape_inference
         return True
     except (ImportError, AttributeError):
         # Internal API not available, will use fallback
@@ -621,6 +636,39 @@ def infer_shapes_with_custom_ops(
                     except Exception as custom_err:
                         print(f"    Custom inference failed: {str(custom_err)}")
 
+    # Standard ONNX shape inference skips unknown custom ops (com.microsoft domain).
+    # Always apply our custom handler for these nodes so that their output shapes
+    # are populated even when the standard pass succeeds for all other nodes.
+    custom_nodes = [
+        node
+        for node in inferred_model.graph.node
+        if node.domain == "com.microsoft" or node.op_type == "InPlaceAccumulatorV2"
+    ]
+    if custom_nodes:
+        print(f"  🔧 Applying custom shape inference for {len(custom_nodes)} Microsoft op(s)...")
+        for node in custom_nodes:
+            apply_custom_inference(inferred_model.graph, node)
+
+    # Apply custom inference for ALL nodes (not just com.microsoft ones) to handle
+    # training-specific ops like ConcatTraining, SplitTraining, LayerNormalizationGrad
+    # that appear in backward-pass graphs.
+    all_custom_ops = {"ConcatTraining", "SplitTraining", "LayerNormalizationGrad"}
+    extra_nodes = [node for node in inferred_model.graph.node if node.op_type in all_custom_ops]
+    if extra_nodes:
+        print(f"  🔧 Applying custom shape inference for {len(extra_nodes)} training op(s)...")
+        for node in extra_nodes:
+            apply_custom_inference(inferred_model.graph, node)
+
+    # Standard ONNX infer_shapes cannot propagate past com.microsoft ops like
+    # SoftmaxCrossEntropyLossGrad — their outputs remain unknown even if the
+    # downstream nodes are standard Gemm ops with otherwise-known inputs.
+    # Run a post-pass that manually infers any Gemm output still missing its shape.
+    apply_gemm_shape_inference(inferred_model.graph)
+
+    # Propagate shapes for downstream standard ops (ReduceSum, Reshape) that
+    # depend on tensors whose shapes were just set by the custom handlers above.
+    propagate_residual_shapes(inferred_model.graph)
+
     # Save if output path provided
     if output_model_path:
         onnx.save(inferred_model, output_model_path)
@@ -637,23 +685,281 @@ def apply_custom_inference(graph: onnx.GraphProto, node: onnx.NodeProto) -> None
         graph: ONNX graph containing the node
         node: Node to apply custom shape inference to
     """
-    if node.op_type == "com.microsoft.SoftmaxCrossEntropyGrad":
-        # Output shape matches log_prob input (3rd input)
-        if len(node.input) >= 3 and len(node.output) >= 1:
-            log_prob_shape = get_tensor_shape(graph, node.input[2])
+    op = node.op_type
+
+    if op in (
+        "SoftmaxCrossEntropyLossGrad",
+        "SoftmaxCrossEntropyGrad",
+        "com.microsoft.SoftmaxCrossEntropyLossGrad",
+        "com.microsoft.SoftmaxCrossEntropyGrad",
+    ):
+        # output_grad has same shape as log_prob.
+        # In ORT-generated training models input[0] = log_prob (softmax log-probs,
+        # same shape as model output), input[1] = labels (integer targets).
+        if len(node.input) >= 1 and len(node.output) >= 1:
+            # Skip if standard inference already set a multi-dimensional shape.
+            existing = get_tensor_shape(graph, node.output[0])
+            if existing and len(existing) > 1:
+                return
+            log_prob_shape = get_tensor_shape(graph, node.input[0])
             if log_prob_shape:
                 set_tensor_shape(graph, node.output[0], log_prob_shape)
-                print(f"    SoftmaxCrossEntropyGrad output shape: {log_prob_shape}")
+                print(f"    {op} output_grad shape: {log_prob_shape}")
 
-    elif "com.microsoft" in node.op_type:
-        # Generic handling for gradient ops
-        if "Grad" in node.op_type:
-            # Most gradient ops output same shape as input
-            if len(node.input) >= 2 and len(node.output) >= 1:
-                input_shape = get_tensor_shape(graph, node.input[1])
-                if input_shape:
-                    set_tensor_shape(graph, node.output[0], input_shape)
-                    print(f"    {node.op_type} output shape: {input_shape}")
+    elif op == "InPlaceAccumulatorV2":
+        # Output shape equals buffer (input[0]) / gradient (input[1]) shape.
+        # InPlaceAccumulatorV2 semantics:
+        #   if lazy_reset_grad: out = gradient          (reset)
+        #   else:               out = buffer + gradient  (accumulate)
+        # Either way output has the same shape as the first two inputs.
+        # Also set the gradient (input[1]) shape from the buffer shape, because
+        # ONNX shape inference cannot traverse com.microsoft ops (e.g. ReluGrad)
+        # that produce the gradient tensor, leaving its shape unknown.
+        if len(node.input) >= 2 and len(node.output) >= 1:
+            buffer_shape = get_tensor_shape(graph, node.input[0])
+            if buffer_shape:
+                # Set output shape
+                set_tensor_shape(graph, node.output[0], buffer_shape)
+                print(f"    InPlaceAccumulatorV2 output shape: {buffer_shape}")
+                # Propagate shape to gradient input (same shape as buffer)
+                gradient_name = node.input[1]
+                existing_grad_shape = get_tensor_shape(graph, gradient_name)
+                if not existing_grad_shape or all(d == 0 for d in existing_grad_shape):
+                    set_tensor_shape(graph, gradient_name, buffer_shape)
+                    print(f"    InPlaceAccumulatorV2 gradient shape: {buffer_shape}")
+
+    elif op in ("ConcatTraining", "com.microsoft.ConcatTraining"):
+        # ConcatTraining: like Concat but also outputs per_input_length.
+        # output[0] = concatenated tensor (standard ONNX can infer this from value_info)
+        # output[1] = per_input_length: 1-D int64 tensor of length = num_inputs
+        if len(node.output) >= 2 and node.output[1]:
+            num_inputs = len(node.input)  # all inputs are tensors to concat
+            sizes_name = node.output[1]
+            existing = get_tensor_shape(graph, sizes_name)
+            if not existing:
+                set_tensor_shape(graph, sizes_name, [num_inputs])
+                print(f"    ConcatTraining per_input_length shape: [{num_inputs}]")
+
+    elif op in ("LayerNormalizationGrad", "com.microsoft.LayerNormalizationGrad"):
+        # LayerNormalizationGrad outputs: [dX, d_Scale, d_Bias]
+        # d_Scale and d_Bias have the same shape as the scale input (input[2]).
+        if len(node.input) >= 3:
+            scale_shape = get_tensor_shape(graph, node.input[2])
+            if scale_shape:
+                for out_idx in range(1, len(node.output)):
+                    out_name = node.output[out_idx] if out_idx < len(node.output) else ""
+                    if out_name:
+                        existing = get_tensor_shape(graph, out_name)
+                        if not existing:
+                            set_tensor_shape(graph, out_name, scale_shape)
+                            label = "d_Scale" if out_idx == 1 else "d_Bias"
+                            print(f"    LayerNormalizationGrad {label} shape: {scale_shape}")
+
+    elif op in ("SplitTraining", "com.microsoft.SplitTraining"):
+        # SplitTraining: backward of ConcatTraining.
+        # Splits input[0] along axis into N chunks, where N is determined by
+        # input[1] = per_input_length tensor (produced by ConcatTraining).
+        # We recover the output shapes by finding the corresponding ConcatTraining
+        # node whose second output produced the per_input_length tensor.
+        if len(node.input) >= 2 and len(node.output) >= 1:
+            sizes_name = node.input[1]
+            # Find the ConcatTraining node that produced this sizes tensor.
+            for prod_node in graph.node:
+                if len(prod_node.output) >= 2 and prod_node.output[1] == sizes_name:
+                    # Output shapes of SplitTraining correspond to the input shapes
+                    # of the ConcatTraining (same position).
+                    for out_idx, out_name in enumerate(node.output):
+                        if not out_name:
+                            continue
+                        existing = get_tensor_shape(graph, out_name)
+                        if existing:
+                            continue
+                        if out_idx < len(prod_node.input):
+                            src_shape = get_tensor_shape(graph, prod_node.input[out_idx])
+                            if src_shape:
+                                set_tensor_shape(graph, out_name, src_shape)
+                                print(f"    SplitTraining output[{out_idx}] shape: {src_shape}")
+                    break
+
+    elif node.domain == "com.microsoft" and "Grad" in op:
+        # Generic handling for gradient ops (domain-safe check)
+        if len(node.input) >= 2 and len(node.output) >= 1:
+            input_shape = get_tensor_shape(graph, node.input[1])
+            if input_shape:
+                set_tensor_shape(graph, node.output[0], input_shape)
+                print(f"    {op} output shape: {input_shape}")
+
+
+def apply_gemm_shape_inference(graph: onnx.GraphProto) -> None:
+    """
+    Manually infer output shapes for Gemm nodes whose outputs are still unknown.
+
+    Standard ONNX shape_inference cannot propagate past com.microsoft ops such as
+    SoftmaxCrossEntropyLossGrad.  Any standard Gemm node that is downstream of such
+    a node and whose output shape has not been filled in by ONNX is handled here:
+    the output shape is computed directly from transA / transB and the input shapes.
+
+    Args:
+        graph: ONNX graph to update in-place
+    """
+    for node in graph.node:
+        if node.op_type != "Gemm" or node.domain != "":
+            continue
+        if not node.output or not node.output[0]:
+            continue
+        output_name = node.output[0]
+        # Skip if shape is already known
+        existing = get_tensor_shape(graph, output_name)
+        if existing and any(d > 0 for d in existing):
+            continue
+        if len(node.input) < 2:
+            continue
+        A_shape = get_tensor_shape(graph, node.input[0])
+        B_shape = get_tensor_shape(graph, node.input[1])
+        if not A_shape or not B_shape or len(A_shape) < 2 or len(B_shape) < 2:
+            continue
+        transA = 0
+        transB = 0
+        for attr in node.attribute:
+            if attr.name == "transA":
+                transA = attr.i
+            elif attr.name == "transB":
+                transB = attr.i
+        if len(A_shape) > 2:
+            # Batched Gemm: batch_dims + [M, N]
+            batch_dims = list(A_shape[:-2])
+            M = A_shape[-1] if transA else A_shape[-2]
+            N = B_shape[-2] if transB else B_shape[-1]
+            output_shape = batch_dims + [M, N]
+        else:
+            M = A_shape[1] if transA else A_shape[0]
+            N = B_shape[0] if transB else B_shape[1]
+            output_shape = [M, N]
+        set_tensor_shape(graph, output_name, output_shape)
+        print(f"    Gemm {node.name}: inferred output shape {output_shape}")
+
+
+def propagate_residual_shapes(graph: onnx.GraphProto) -> None:
+    """
+    Iteratively propagate shapes for standard ops (ReduceSum, Reshape) whose
+    inputs were given shapes by the custom inference handlers but whose outputs
+    were still unknown because ONNX standard shape inference ran before the
+    custom handlers.
+
+    This pass repeats until no more shapes can be resolved.
+
+    Args:
+        graph: ONNX graph to update in-place
+    """
+    import numpy as np
+
+    # Build initializer lookup: name → int64 data (for Reshape shape inputs)
+    init_int64: dict = {}
+    for init in graph.initializer:
+        if init.data_type == onnx.TensorProto.INT64:
+            try:
+                data = np.frombuffer(init.raw_data, dtype=np.int64).tolist()
+                init_int64[init.name] = data
+            except Exception:
+                pass
+
+    # Build producer map: tensor_name → node that produces it
+    producers: dict = {}
+    for node in graph.node:
+        for out_name in node.output:
+            if out_name:
+                producers[out_name] = node
+
+    changed = True
+    while changed:
+        changed = False
+        for node in graph.node:
+            for out_idx, out_name in enumerate(node.output):
+                if not out_name:
+                    continue
+                existing = get_tensor_shape(graph, out_name)
+                if existing:
+                    continue  # already has shape (non-empty list)
+
+                if node.op_type == "ReduceSum" and len(node.input) >= 1:
+                    input_shape = get_tensor_shape(graph, node.input[0])
+                    if not input_shape:
+                        continue
+                    axes = []
+                    keepdims = 1
+                    for attr in node.attribute:
+                        if attr.name == "axes":
+                            axes = list(attr.ints)
+                        elif attr.name == "keepdims":
+                            keepdims = attr.i
+                    ndim = len(input_shape)
+                    norm_axes = {a % ndim for a in axes}
+                    out_shape = []
+                    for i, s in enumerate(input_shape):
+                        if i in norm_axes:
+                            if keepdims:
+                                out_shape.append(1)
+                        else:
+                            out_shape.append(s)
+                    if out_shape or not axes:
+                        if not out_shape and not axes:
+                            # No axes → reduce over everything
+                            out_shape = [1] * ndim if keepdims else []
+                        set_tensor_shape(graph, out_name, out_shape if out_shape else [1])
+                        print(f"    propagate ReduceSum {node.name}: {out_name} → {out_shape}")
+                        changed = True
+
+                elif node.op_type == "Reshape" and len(node.input) >= 2:
+                    shape_input = node.input[1]
+                    target_shape = None
+                    if shape_input in init_int64:
+                        # Shape stored as initializer constant
+                        target_shape = init_int64[shape_input]
+                    else:
+                        # Shape input produced by a Shape node:
+                        # Shape(X) → values = shape of X = target_shape for Reshape
+                        shape_producer = producers.get(shape_input)
+                        if shape_producer and shape_producer.op_type == "Shape":
+                            src = shape_producer.input[0] if shape_producer.input else None
+                            if src:
+                                src_shape = get_tensor_shape(graph, src)
+                                if src_shape:
+                                    target_shape = src_shape  # values = shape of src
+                    if target_shape is not None:
+                        set_tensor_shape(graph, out_name, target_shape)
+                        print(f"    propagate Reshape {node.name}: {out_name} → {target_shape}")
+                        changed = True
+
+                elif node.op_type == "Gemm" and node.domain == "" and out_idx == 0:
+                    # Fallback for Gemm nodes not handled by apply_gemm_shape_inference.
+                    # Handles 2D and batched (3D+) cases.
+                    if len(node.input) < 2:
+                        continue
+                    A_shape = get_tensor_shape(graph, node.input[0])
+                    B_shape = get_tensor_shape(graph, node.input[1])
+                    if not A_shape or not B_shape:
+                        continue
+                    if len(A_shape) < 2 or len(B_shape) < 2:
+                        continue
+                    transA = 0
+                    transB = 0
+                    for attr in node.attribute:
+                        if attr.name == "transA":
+                            transA = attr.i
+                        elif attr.name == "transB":
+                            transB = attr.i
+                    if len(A_shape) > 2:
+                        batch_dims = list(A_shape[:-2])
+                        M = A_shape[-1] if transA else A_shape[-2]
+                        N = B_shape[-2] if transB else B_shape[-1]
+                        output_shape = batch_dims + [M, N]
+                    else:
+                        M = A_shape[1] if transA else A_shape[0]
+                        N = B_shape[0] if transB else B_shape[1]
+                        output_shape = [M, N]
+                    set_tensor_shape(graph, out_name, output_shape)
+                    print(f"    propagate Gemm {node.name}: {out_name} → {output_shape}")
+                    changed = True
 
 
 def extract_subgraph(model: onnx.ModelProto, nodes: List[onnx.NodeProto]) -> onnx.ModelProto:

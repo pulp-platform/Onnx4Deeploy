@@ -24,6 +24,7 @@ from .groupnorm_grad_w import GroupNormGradWOperatorTest
 from .groupnorm_grad_w_h2 import GroupNormGradWH2OperatorTest
 from .groupnorm_grad_x import GroupNormGradXOperatorTest
 from .groupnorm_h2 import GroupNormH2OperatorTest
+from .inplaceaccumulatorv2 import InPlaceAccumulatorV2OperatorTest
 from .layernorm import LayerNormOperatorTest
 from .layernorm_grad import LayerNormGradOperatorTest
 from .matmul import MatMulOperatorTest
@@ -58,6 +59,7 @@ __all__ = [
     "AveragePoolGradOperatorTest",
     "ReluGradOperatorTest",
     "SGDOperatorTest",
+    "InPlaceAccumulatorV2OperatorTest",
     "SoftmaxCrossEntropyOperatorTest",
     "SoftmaxCrossEntropyGradOperatorTest",
     "SoftmaxGradOperatorTest",

@@ -197,6 +197,8 @@ def list_available_operators():
         "ReduceSum": "Sum reduction",
         "SoftmaxCrossEntropy": "Softmax cross entropy",
         "ReluGrad": "ReLU gradient",
+        # Training operators (custom domain: com.microsoft)
+        "InPlaceAccumulatorV2": "Gradient accumulation with lazy reset (com.microsoft)",
     }
     return operators
 
@@ -272,7 +274,16 @@ def generate_operator(operator_name: str, output_path: Optional[str] = None):
         sys.exit(1)
 
 
-def generate_model(model_name: str, mode: str, output_path: Optional[str] = None):
+def generate_model(
+    model_name: str,
+    mode: str,
+    output_path: Optional[str] = None,
+    n_batches: int = 4,
+    n_accum: int = 1,
+    batch_size: int = 1,
+    dataset: str = "random",
+    data_path: Optional[str] = None,
+):
     """Generate model ONNX"""
     print(f"\n{'='*70}")
     print(f"🚀 Generating model: {model_name} ({mode.upper()} mode)")
@@ -306,6 +317,19 @@ def generate_model(model_name: str, mode: str, output_path: Optional[str] = None
     try:
         # Create exporter
         exporter = model_class(save_path=output_path)
+
+        # Store CLI overrides that must survive the internal load_config() call
+        # inside export_training().  Exporters that support _config_overrides
+        # will apply these at the end of their load_config() implementation.
+        exporter._config_overrides = {}
+        if mode == "train":
+            exporter._config_overrides["n_batches"] = n_batches
+            exporter._config_overrides["n_accum"] = n_accum
+            exporter._config_overrides["batch_size"] = batch_size
+        # Dataset selection applies to both infer and train data generation
+        exporter._config_overrides["dataset"] = dataset
+        if data_path is not None:
+            exporter._config_overrides["data_path"] = data_path
 
         # Apply model-specific configuration if available
         if "config" in models[model_key]:
@@ -452,6 +476,55 @@ Examples:
         "--list-operators", action="store_true", help="List all available operators"
     )
 
+    # Training-specific options
+    parser.add_argument(
+        "--n-batches",
+        type=int,
+        default=4,
+        dest="n_batches",
+        metavar="N",
+        help="(train mode) Number of distinct mini-batch samples to generate in "
+        "inputs.npz (arr_0000…arr_M-1 for mb 0, plus mb1_arr_* … mbN-1_arr_* "
+        "for additional batches). Default: 4.",
+    )
+    parser.add_argument(
+        "--n-accum",
+        type=int,
+        default=1,
+        dest="n_accum",
+        metavar="N",
+        help="(train mode) Number of mini-batches to accumulate per SGD update step "
+        "(gradient accumulation). n_batches must be divisible by n_accum. "
+        "Default: 1 (no accumulation).",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        dest="batch_size",
+        metavar="N",
+        help="(train mode) Number of samples per mini-batch (batch size). Default: 1.",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="random",
+        choices=["random", "mnist"],
+        dest="dataset",
+        help="Data source for training test data. "
+        "'random' (default): random Gaussian inputs. "
+        "'mnist': real MNIST images (downloaded automatically if needed).",
+    )
+    parser.add_argument(
+        "--data-path",
+        type=str,
+        default=None,
+        dest="data_path",
+        metavar="PATH",
+        help="Root directory for dataset files (used with --dataset mnist). "
+        "Default: /tmp/mnist.",
+    )
+
     # Other options
     parser.add_argument("--examples", action="store_true", help="Show usage examples")
 
@@ -497,7 +570,16 @@ Examples:
     if args.operator:
         generate_operator(args.operator, args.output)
     elif args.model:
-        generate_model(args.model, args.mode, args.output)
+        generate_model(
+            args.model,
+            args.mode,
+            args.output,
+            n_batches=args.n_batches,
+            n_accum=args.n_accum,
+            batch_size=args.batch_size,
+            dataset=args.dataset,
+            data_path=args.data_path,
+        )
 
 
 if __name__ == "__main__":
