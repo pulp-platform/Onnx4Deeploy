@@ -41,8 +41,8 @@ class CCTExporter(BaseONNXExporter):
         # Default CCT configuration for testing
         config = {
             "batch_size": 1,
-            "img_size": 32,
-            "embedding_dim": 128,
+            "img_size": 8,  # Small image for L2-constrained testing (32 → 8)
+            "embedding_dim": 32,  # Reduced from 128: avoids PULP L2 overflow with frozen weights
             "num_heads": 2,
             "num_layers": 2,
             "num_classes": 10,
@@ -51,7 +51,7 @@ class CCTExporter(BaseONNXExporter):
             "kernel_size": 3,
             "positional_embedding": "learnable",
             # Training configuration
-            "training_strategy": "linear",  # Options: "linear", "last_attention", "last_2_attention", "lora_block1", "lora_block2", "full", "custom"
+            "training_strategy": "no_tokenizer",  # Options: "no_tokenizer", "last_block", "linear", "full", "custom"
             "custom_trainable_params": [],  # Used when training_strategy = "custom"
             # Training loop configuration
             "learning_rate": 0.001,
@@ -107,134 +107,55 @@ class CCTExporter(BaseONNXExporter):
         """
         Get list of trainable parameter names for CCT based on training strategy.
 
-        Supports multiple training strategies for different fine-tuning scenarios:
-        - "linear": Only train final classification layer (default)
-        - "last_attention": Train last attention block + classifier
-        - "last_2_attention": Train last 2 attention blocks + classifier
-        - "lora_block1": LoRA-style training for block 1
-        - "lora_block2": LoRA-style training for both blocks
-        - "full": Train all parameters
-        - "custom": Use custom_trainable_params from config
+        Uses pattern-based filtering on ONNX initializer names (robust across pipeline
+        versions, unlike hardcoded lists).
+
+        Strategies:
+        - "no_tokenizer" (default): Freeze only Conv tokenizer; train all transformer
+          blocks (attention + MLP + norms + FC + positional_emb + attention_pool).
+          Frozen constants: only tokenizer_conv_layers_* (~3 KB) — fits in PULP L2.
+        - "last_block": Freeze tokenizer + positional_emb + blocks_0_*; train block 1
+          + attention_pool + norm + FC.
+        - "linear": Only train the final FC layer (classifier_fc_weight/bias).
+        - "full": Train all parameters (no frozen constants).
+        - "custom": Use custom_trainable_params list from config.
 
         Args:
-            all_param_names: List of all parameter names in the model
+            all_param_names: List of all ONNX initializer names
 
         Returns:
             List of parameter names that should be trainable
         """
-        strategy = self.config.get("training_strategy", "linear")
+        strategy = self.config.get("training_strategy", "no_tokenizer")
 
-        # Define training strategies
-        strategy_params = {
-            "linear": [
-                "classifier_fc_weight",
-                "classifier_fc_bias",
-            ],
-            "last_attention": [
-                "classifier_fc_weight",
-                "classifier_fc_bias",
-                "node_0_classifier_attention_pool_Transpose__0",
-                "classifier_attention_pool_bias",
-                "node_0_classifier_blocks_1_linear2_Transpose__0",
-                "classifier_blocks_0_self_attn_proj_bias_Identity_31",
-                "node_0_classifier_blocks_1_linear1_Transpose__0",
-                "classifier_blocks_0_self_attn_proj_bias_Identity_33",
-                "node_0_classifier_blocks_1_self_attn_proj_Transpose__0",
-                "node_0_classifier_blocks_1_self_attn_v_proj_Transpose__0",
-                "node_0_classifier_blocks_1_self_attn_k_proj_Transpose__0",
-                "node_0_classifier_blocks_1_self_attn_q_proj_Transpose__0",
-            ],
-            "last_2_attention": [
-                "classifier_fc_weight",
-                "classifier_fc_bias",
-                "node_0_classifier_attention_pool_Transpose__0",
-                "classifier_attention_pool_bias",
-                "node_0_classifier_blocks_1_linear2_Transpose__0",
-                "classifier_blocks_0_self_attn_proj_bias_Identity_31",
-                "node_0_classifier_blocks_1_linear1_Transpose__0",
-                "classifier_blocks_0_self_attn_proj_bias_Identity_33",
-                "node_0_classifier_blocks_1_self_attn_proj_Transpose__0",
-                "node_0_classifier_blocks_1_self_attn_v_proj_Transpose__0",
-                "node_0_classifier_blocks_1_self_attn_k_proj_Transpose__0",
-                "node_0_classifier_blocks_1_self_attn_q_proj_Transpose__0",
-                "node_0_classifier_blocks_0_linear2_Transpose__0",
-                "classifier_blocks_0_self_attn_proj_bias_Identity_34",
-                "node_0_classifier_blocks_0_linear1_Transpose__0",
-                "node_0_classifier_blocks_0_self_attn_proj_Transpose__0",
-                "classifier_blocks_0_self_attn_proj_bias__classifier_blocks_0_self_attn_proj_Add",
-                "node_0_classifier_blocks_0_self_attn_k_proj_Transpose__0",
-                "node_0_classifier_blocks_0_self_attn_q_proj_Transpose__0",
-                "node_0_classifier_blocks_0_self_attn_v_proj_Transpose__0",
-            ],
-            "lora_block1": [
-                "classifier_fc_weight",
-                "classifier_fc_bias",
-                "node_0_classifier_attention_pool_Transpose__0",
-                "classifier_attention_pool_bias",
-                "node_0_classifier_blocks_1_linear2_Transpose_1__0",
-                "node_0_classifier_blocks_1_linear2_Transpose__0",
-                "node_0_classifier_blocks_1_linear1_Transpose_1__0",
-                "node_0_classifier_blocks_1_linear1_Transpose__0",
-                "node_0_classifier_blocks_1_self_attn_Transpose_11__0",
-                "node_0_classifier_blocks_1_self_attn_Transpose_10__0",
-                "node_0_classifier_blocks_1_self_attn_Transpose_4__0",
-                "node_0_classifier_blocks_1_self_attn_Transpose_3__0",
-                "node_0_classifier_blocks_1_self_attn_Transpose__0",
-                "node_0_classifier_blocks_1_self_attn_Transpose_1__0",
-                "node_0_classifier_blocks_1_self_attn_Transpose_5__0",
-                "node_0_classifier_blocks_1_self_attn_Transpose_6__0",
-            ],
-            "lora_block2": [
-                "classifier_fc_weight",
-                "classifier_fc_bias",
-                "node_0_classifier_attention_pool_Transpose__0",
-                "classifier_attention_pool_bias",
-                # Block 1
-                "node_0_classifier_blocks_1_linear2_Transpose_1__0",
-                "node_0_classifier_blocks_1_linear2_Transpose__0",
-                "node_0_classifier_blocks_1_linear1_Transpose_1__0",
-                "node_0_classifier_blocks_1_linear1_Transpose__0",
-                "node_0_classifier_blocks_1_self_attn_Transpose_11__0",
-                "node_0_classifier_blocks_1_self_attn_Transpose_10__0",
-                "node_0_classifier_blocks_1_self_attn_Transpose_4__0",
-                "node_0_classifier_blocks_1_self_attn_Transpose_3__0",
-                "node_0_classifier_blocks_1_self_attn_Transpose__0",
-                "node_0_classifier_blocks_1_self_attn_Transpose_1__0",
-                "node_0_classifier_blocks_1_self_attn_Transpose_5__0",
-                "node_0_classifier_blocks_1_self_attn_Transpose_6__0",
-                # Block 0
-                "node_0_classifier_blocks_0_linear2_Transpose_1__0",
-                "node_0_classifier_blocks_0_linear2_Transpose__0",
-                "node_0_classifier_blocks_0_linear1_Transpose_1__0",
-                "node_0_classifier_blocks_0_linear1_Transpose__0",
-                "node_0_classifier_blocks_0_self_attn_Transpose_11__0",
-                "node_0_classifier_blocks_0_self_attn_Transpose_10__0",
-                "node_0_classifier_blocks_0_self_attn_Transpose_4__0",
-                "node_0_classifier_blocks_0_self_attn_Transpose_3__0",
-                "node_0_classifier_blocks_0_self_attn_Transpose__0",
-                "node_0_classifier_blocks_0_self_attn_Transpose_1__0",
-                "node_0_classifier_blocks_0_self_attn_Transpose_5__0",
-                "node_0_classifier_blocks_0_self_attn_Transpose_6__0",
-            ],
-            "full": all_param_names,  # Train everything
-            "custom": self.config.get("custom_trainable_params", []),
+        # Pattern-based strategies — freeze params whose names match the freeze pattern.
+        # This is robust to ONNX pipeline renames (no hardcoded node_0_* names).
+        _FREEZE = {
+            # freeze only Conv tokenizer → train all transformer layers
+            "no_tokenizer": lambda n: "tokenizer" in n,
+            # freeze tokenizer + positional emb + first block → train last block only
+            "last_block": lambda n: "tokenizer" in n or "positional_emb" in n or "blocks_0" in n,
+            # freeze everything except FC
+            "linear": lambda n: n not in {"classifier_fc_weight", "classifier_fc_bias"},
+            # freeze nothing
+            "full": lambda n: False,
+            # freeze nothing from the explicit list (keep user-supplied names)
+            "custom": lambda n: n not in self.config.get("custom_trainable_params", []),
         }
 
-        # Get trainable params based on strategy
-        if strategy not in strategy_params:
-            print(f"⚠️  Unknown training strategy '{strategy}', using 'linear' as fallback")
-            strategy = "linear"
+        if strategy not in _FREEZE:
+            print(f"⚠️  Unknown training strategy '{strategy}', using 'no_tokenizer' as fallback")
+            strategy = "no_tokenizer"
 
-        trainable_params = strategy_params[strategy]
+        requires_grad = [n for n in all_param_names if not _FREEZE[strategy](n)]
 
-        # Filter to only include params that exist in the model
-        requires_grad = [name for name in all_param_names if name in trainable_params]
-
-        # Print strategy info
+        frozen = [n for n in all_param_names if _FREEZE[strategy](n)]
         print(f"\n🎯 Training Strategy: '{strategy}'")
-        print(f"   Total params in model: {len(all_param_names)}")
-        print(f"   Params to train: {len(requires_grad)}")
-        print(f"   Frozen params: {len(all_param_names) - len(requires_grad)}")
+        print(
+            f"   Total params: {len(all_param_names)}  |  Trainable: {len(requires_grad)}  |  Frozen: {len(frozen)}"
+        )
+        if frozen:
+            print(f"   Frozen (→ constant): {frozen}")
 
         return requires_grad
 
@@ -372,6 +293,14 @@ class CCTExporter(BaseONNXExporter):
             raise ValueError(f"n_batches={n_batches} must be divisible by n_accum={n_accum}")
         n_steps = n_batches // n_accum
 
+        # Determine effective_data_size: only unique samples stored in NPZ/C header.
+        _data_size_cfg = self.config.get("data_size", None)
+        effective_data_size = (
+            int(_data_size_cfg)
+            if (_data_size_cfg and int(_data_size_cfg) < n_batches)
+            else n_batches
+        )
+
         save_dir = Path(self.paths["output_dir"])
         save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -383,13 +312,20 @@ class CCTExporter(BaseONNXExporter):
 
         print(
             f"   Training sim: n_batches={n_batches}  n_accum={n_accum}  n_steps={n_steps}  lr={learning_rate}"
+            + (
+                f"  data_size={effective_data_size} (cycling)"
+                if effective_data_size < n_batches
+                else ""
+            )
         )
 
-        # Generate n_batches distinct (input, labels) pairs.
-        test_inputs = [np.random.randn(*input_shape).astype(np.float32) for _ in range(n_batches)]
+        # Generate effective_data_size distinct (input, labels) pairs; cycle via modulo for ORT.
+        test_inputs = [
+            np.random.randn(*input_shape).astype(np.float32) for _ in range(effective_data_size)
+        ]
         labels_list = [
             np.random.randint(0, num_classes, size=(batch_size,)).astype(np.int64)
-            for _ in range(n_batches)
+            for _ in range(effective_data_size)
         ]
 
         # Read initial parameter values from the inference model.
@@ -442,7 +378,7 @@ class CCTExporter(BaseONNXExporter):
                     name = inp.name
                     shape = [d for d in inp.shape if isinstance(d, int) and d > 0]
                     if inp.type == "tensor(int64)":
-                        feed[name] = labels_list[mb]
+                        feed[name] = labels_list[mb % effective_data_size]
                     elif inp.type == "tensor(bool)":
                         # lazy_reset_grad: True on first accum step, False otherwise.
                         feed[name] = np.array([accum_step == 0])
@@ -451,7 +387,7 @@ class CCTExporter(BaseONNXExporter):
                     elif _GRAD_ACC in name:
                         feed[name] = np.zeros(shape, dtype=np.float32)
                     elif shape == list(input_shape):
-                        feed[name] = test_inputs[mb]
+                        feed[name] = test_inputs[mb % effective_data_size]
                     else:
                         feed[name] = np.zeros(shape, dtype=np.float32)
 
@@ -501,11 +437,11 @@ class CCTExporter(BaseONNXExporter):
             else:
                 print(f"   ⚠️  network.onnx non-grad input '{name}' not found in feed — skipping")
 
-        # Per-mini-batch DATA entries for mb 1 … n_batches-1.
-        # Build a dtype look-up from the session inputs.
+        # Per-mini-batch DATA entries for mb 1 … effective_data_size-1 (unique samples only).
+        # The C harness cycles via mb % TRAINING_DATA_SIZE, so no duplicates are stored.
         session_type: dict = {inp.name: inp.type for inp in session.get_inputs()}
         data_names = non_grad_names[:num_data_inputs]
-        for mb in range(1, n_batches):
+        for mb in range(1, effective_data_size):
             for buf_idx, data_name in enumerate(data_names):
                 inp_type = session_type.get(data_name, "tensor(float)")
                 if inp_type == "tensor(int64)":
@@ -513,14 +449,16 @@ class CCTExporter(BaseONNXExporter):
                 else:
                     save_dict[f"mb{mb}_arr_{buf_idx:04d}"] = test_inputs[mb]
 
+        save_dict["meta_data_size"] = np.array([effective_data_size], dtype=np.int32)
+        save_dict["meta_n_batches"] = np.array([n_batches], dtype=np.int32)
         np.savez(save_dir / "inputs.npz", **save_dict)
         n_params = sum(1 for n in non_grad_names if n in init_map)
         n_grad = len(grad_acc_names)
         print(
             f"   ✅ inputs.npz  — {len(non_grad_names)} base tensors "
             f"(data + {n_params} params + ctrl; {n_grad} grad-acc-buf(s) omitted) "
-            f"+ {(n_batches - 1) * num_data_inputs} per-mb DATA entries "
-            f"({n_batches} mini-batches total)"
+            f"+ {(effective_data_size - 1) * num_data_inputs} unique DATA entries "
+            f"({effective_data_size} unique samples, {n_batches} total mini-batches with cycling)"
         )
 
         np.savez(save_dir / "outputs.npz", **outputs_dict)

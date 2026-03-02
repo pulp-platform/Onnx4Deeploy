@@ -371,6 +371,14 @@ class SleepConViTExporter(BaseONNXExporter):
             raise ValueError(f"n_batches={n_batches} must be divisible by n_accum={n_accum}")
         n_steps = n_batches // n_accum
 
+        # Determine effective_data_size: only unique samples stored in NPZ/C header.
+        _data_size_cfg = self.config.get("data_size", None)
+        effective_data_size = (
+            int(_data_size_cfg)
+            if (_data_size_cfg and int(_data_size_cfg) < n_batches)
+            else n_batches
+        )
+
         save_dir = Path(self.paths["output_dir"])
         save_dir.mkdir(parents=True, exist_ok=True)
 
@@ -382,13 +390,20 @@ class SleepConViTExporter(BaseONNXExporter):
 
         print(
             f"   Training sim: n_batches={n_batches}  n_accum={n_accum}  n_steps={n_steps}  lr={learning_rate}"
+            + (
+                f"  data_size={effective_data_size} (cycling)"
+                if effective_data_size < n_batches
+                else ""
+            )
         )
 
-        # Generate n_batches distinct (input, labels) pairs.
-        test_inputs = [np.random.randn(*input_shape).astype(np.float32) for _ in range(n_batches)]
+        # Generate effective_data_size distinct (input, labels) pairs; cycle via modulo for ORT.
+        test_inputs = [
+            np.random.randn(*input_shape).astype(np.float32) for _ in range(effective_data_size)
+        ]
         labels_list = [
             np.random.randint(0, num_classes, size=(batch_size,)).astype(np.int64)
-            for _ in range(n_batches)
+            for _ in range(effective_data_size)
         ]
 
         # Read initial parameter values from the inference model.
@@ -441,7 +456,7 @@ class SleepConViTExporter(BaseONNXExporter):
                     name = inp.name
                     shape = [d for d in inp.shape if isinstance(d, int) and d > 0]
                     if inp.type == "tensor(int64)":
-                        feed[name] = labels_list[mb]
+                        feed[name] = labels_list[mb % effective_data_size]
                     elif inp.type == "tensor(bool)":
                         # lazy_reset_grad: True on first accum step, False otherwise.
                         feed[name] = np.array([accum_step == 0])
@@ -450,7 +465,7 @@ class SleepConViTExporter(BaseONNXExporter):
                     elif _GRAD_ACC in name:
                         feed[name] = np.zeros(shape, dtype=np.float32)
                     elif shape == list(input_shape):
-                        feed[name] = test_inputs[mb]
+                        feed[name] = test_inputs[mb % effective_data_size]
                     else:
                         feed[name] = np.zeros(shape, dtype=np.float32)
 
@@ -500,11 +515,11 @@ class SleepConViTExporter(BaseONNXExporter):
             else:
                 print(f"   ⚠️  network.onnx non-grad input '{name}' not found in feed — skipping")
 
-        # Per-mini-batch DATA entries for mb 1 … n_batches-1.
-        # Build a dtype look-up from the session inputs.
+        # Per-mini-batch DATA entries for mb 1 … effective_data_size-1 (unique samples only).
+        # The C harness cycles via mb % TRAINING_DATA_SIZE, so no duplicates are stored.
         session_type: dict = {inp.name: inp.type for inp in session.get_inputs()}
         data_names = non_grad_names[:num_data_inputs]
-        for mb in range(1, n_batches):
+        for mb in range(1, effective_data_size):
             for buf_idx, data_name in enumerate(data_names):
                 inp_type = session_type.get(data_name, "tensor(float)")
                 if inp_type == "tensor(int64)":
@@ -512,14 +527,16 @@ class SleepConViTExporter(BaseONNXExporter):
                 else:
                     save_dict[f"mb{mb}_arr_{buf_idx:04d}"] = test_inputs[mb]
 
+        save_dict["meta_data_size"] = np.array([effective_data_size], dtype=np.int32)
+        save_dict["meta_n_batches"] = np.array([n_batches], dtype=np.int32)
         np.savez(save_dir / "inputs.npz", **save_dict)
         n_params = sum(1 for n in non_grad_names if n in init_map)
         n_grad = len(grad_acc_names)
         print(
             f"   ✅ inputs.npz  — {len(non_grad_names)} base tensors "
             f"(data + {n_params} params + ctrl; {n_grad} grad-acc-buf(s) omitted) "
-            f"+ {(n_batches - 1) * num_data_inputs} per-mb DATA entries "
-            f"({n_batches} mini-batches total)"
+            f"+ {(effective_data_size - 1) * num_data_inputs} unique DATA entries "
+            f"({effective_data_size} unique samples, {n_batches} total mini-batches with cycling)"
         )
 
         np.savez(save_dir / "outputs.npz", **outputs_dict)

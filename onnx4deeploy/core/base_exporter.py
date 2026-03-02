@@ -520,6 +520,9 @@ class BaseONNXExporter(ABC):
         shutil.copy(self.paths["network_train_optim"], self.paths["network"])
         print(f"✅ Final model: {self.paths['network']}")
 
+        # Build the SGD optimizer ONNX graph (reads network.onnx to detect trainable params)
+        self.create_optimizer()
+
         # Generate reference test input/output via ORT on-device training API
         print("\n🧪 Creating test input/output...")
         self.create_training_test_data()
@@ -737,6 +740,43 @@ class BaseONNXExporter(ABC):
 
         except Exception as e:
             print(f"   ⚠️  Fallback test data generation failed: {e}")
+
+    def create_optimizer(self) -> Optional[str]:
+        """
+        Build and save the SGD optimizer ONNX graph alongside the training export.
+
+        Auto-detects trainable parameters via ``<param>_grad.accumulation.buffer``
+        inputs in the final network.onnx, then writes a minimal SGD graph to the
+        conventional optimizer directory next to the training directory:
+
+            <base>/<model>_train  →  <base>/<model>_optimizer/network.onnx
+
+        The learning rate is read from ``config["learning_rate"]`` (default 0.001).
+
+        Returns:
+            Path to the saved optimizer ONNX, or None if the output directory
+            does not follow the ``_train`` naming convention.
+        """
+        from pathlib import Path
+
+        from .optimizer_onnx import create_optimizer_onnx, derive_optimizer_dir
+
+        train_dir = self.paths["output_dir"]
+        opt_dir = derive_optimizer_dir(train_dir)
+        if opt_dir is None:
+            print("   ⚠️  Skipping optimizer ONNX: output dir must end with '_train'")
+            return None
+
+        lr = float(self.config.get("learning_rate", 0.001)) if self.config else 0.001
+        opt_path = str(Path(opt_dir) / "network.onnx")
+
+        print(f"\n⚙️  Building optimizer ONNX (lr={lr}) → {opt_path}")
+        try:
+            create_optimizer_onnx(train_dir=train_dir, output_path=opt_path, lr=lr)
+            return opt_path
+        except Exception as e:
+            print(f"   ⚠️  Optimizer ONNX generation skipped: {e}")
+            return None
 
     def _add_optimizer_nodes(self):
         """

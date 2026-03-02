@@ -23,7 +23,7 @@ import sys
 from pathlib import Path
 from typing import Optional
 
-from onnx4deeploy.core.optimizer_onnx import create_optimizer_onnx, derive_optimizer_dir
+from onnx4deeploy.core.optimizer_onnx import derive_optimizer_dir
 
 # Add project root to path
 project_root = Path(__file__).parent
@@ -377,23 +377,6 @@ def generate_model(
         elif mode == "train":
             onnx_file = exporter.export_training()
             mode_desc = "Training mode"
-
-            # Auto-generate the optimizer ONNX alongside the training ONNX.
-            # Convention: <base>/<model>_train → <base>/<model>_optimizer/network.onnx
-            opt_dir = derive_optimizer_dir(output_path)
-            if opt_dir is not None:
-                lr = (
-                    float(exporter.config.get("learning_rate", 0.001)) if exporter.config else 0.001
-                )
-                print(f"\n⚙️  Generating optimizer ONNX (lr={lr}) → {opt_dir}/")
-                try:
-                    create_optimizer_onnx(
-                        train_dir=output_path,
-                        output_path=str(Path(opt_dir) / "network.onnx"),
-                        lr=lr,
-                    )
-                except Exception as _opt_err:
-                    print(f"  ⚠️  Optimizer ONNX generation skipped: {_opt_err}")
         else:
             print(f"❌ Unknown mode: {mode}")
             print("   Available modes: infer, train")
