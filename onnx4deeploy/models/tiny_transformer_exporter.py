@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-r"""Tiny Transformer Exporter — small patch-based Vision Transformer for MNIST.
+"""Tiny Transformer Exporter — small patch-based Vision Transformer for MNIST.
 
 Design goals:
 - Fast compilation: ~10 K parameters → TrainingNetwork.c ≪ 1 MB
