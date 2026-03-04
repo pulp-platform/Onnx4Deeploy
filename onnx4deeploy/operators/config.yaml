@@ -33,6 +33,11 @@ concat:
   axis: 1  # Concatenate along channel dimension
   base_shape: [1, 4, 8, 8]  # NCHW: each input has 4 channels, output will have 12 channels
 
+# SoftmaxCrossEntropyLoss dual-output variant (loss + log_prob)
+softmax_cross_entropy_dual_output:
+  input_shape: [1, 10]   # [batch, num_classes]
+  opset_version: 13
+
 # InPlaceAccumulatorV2 operator configuration (com.microsoft)
 # Gradient accumulation with lazy reset:
 #   if lazy_reset_grad: out = gradient           (reset)

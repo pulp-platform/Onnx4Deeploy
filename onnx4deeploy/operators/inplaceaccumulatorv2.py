@@ -69,7 +69,17 @@ class InPlaceAccumulatorV2OperatorTest(BaseOperatorTest):
         }
 
     def create_onnx_graph(self, inputs: Dict[str, np.ndarray]):
-        """Create ONNX graph for InPlaceAccumulatorV2 operator."""
+        """Create ONNX graph for InPlaceAccumulatorV2 operator.
+
+        Graph structure:
+            [buffer, gradient, lazy_reset_grad]
+              -> InPlaceAccumulatorV2 -> output  (graph output)
+
+        The Deeploy kernel template writes to both accum_buffer (in-place) and
+        data_out (explicit output pointer). This lets us use the graph output
+        directly without a wrapper node, and prevents graph.cleanup() from
+        eliminating the node as dead code.
+        """
         weight_shape = list(self.weight_shape)
 
         # Input tensors
@@ -78,16 +88,15 @@ class InPlaceAccumulatorV2OperatorTest(BaseOperatorTest):
         # lazy_reset_grad is a bool scalar stored as uint8 (ONNX BOOL type)
         reset_tensor = helper.make_tensor_value_info("lazy_reset_grad", TensorProto.UINT8, [1])
 
-        # Output tensor (same shape as buffer)
-        output_tensor = helper.make_tensor_value_info(
-            "output_buffer", TensorProto.FLOAT, weight_shape
-        )
+        # Graph output tensor (directly from InPlaceAccumulatorV2)
+        output_tensor = helper.make_tensor_value_info("output", TensorProto.FLOAT, weight_shape)
 
         # InPlaceAccumulatorV2 node (com.microsoft custom domain)
+        # output is the graph output: the Deeploy kernel writes result here via data_out
         accum_node = helper.make_node(
             "InPlaceAccumulatorV2",
             inputs=["buffer", "gradient", "lazy_reset_grad"],
-            outputs=["output_buffer"],
+            outputs=["output"],
             name="inplace_accumulator_v2_node",
             domain="com.microsoft",
         )
@@ -113,7 +122,10 @@ class InPlaceAccumulatorV2OperatorTest(BaseOperatorTest):
             ],
         )
 
-        # Set output shape explicitly for custom operator models
+        # Set output shape for 'output' (graph output from InPlaceAccumulatorV2).
+        # ONNX shape inference cannot infer shapes through custom-domain ops, so
+        # we explicitly set dimensions on the graph output to satisfy
+        # Deeploy's _assertTensorsHaveShape() check.
         output_tensor = model.graph.output[0]
         del output_tensor.type.tensor_type.shape.dim[:]
         for dim in self.weight_shape:
@@ -144,4 +156,4 @@ class InPlaceAccumulatorV2OperatorTest(BaseOperatorTest):
         else:
             output = buffer + gradient
 
-        return {"output_buffer": output}
+        return {"output": output}

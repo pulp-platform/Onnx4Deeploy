@@ -35,6 +35,7 @@ from .relu_exporter import ReluExporter
 from .relu_grad import ReluGradOperatorTest
 from .sgd import SGDOperatorTest
 from .softmax_cross_entropy import SoftmaxCrossEntropyOperatorTest
+from .softmax_cross_entropy_dual_output import SoftmaxCrossEntropyDualOutputOperatorTest
 from .softmax_cross_entropy_grad import SoftmaxCrossEntropyGradOperatorTest
 from .softmax_grad import SoftmaxGradOperatorTest
 from .split import SplitOperatorTest
@@ -61,6 +62,7 @@ __all__ = [
     "SGDOperatorTest",
     "InPlaceAccumulatorV2OperatorTest",
     "SoftmaxCrossEntropyOperatorTest",
+    "SoftmaxCrossEntropyDualOutputOperatorTest",
     "SoftmaxCrossEntropyGradOperatorTest",
     "SoftmaxGradOperatorTest",
     "LayerNormOperatorTest",

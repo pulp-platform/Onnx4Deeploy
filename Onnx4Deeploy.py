@@ -205,6 +205,7 @@ def list_available_operators():
         # Others
         "ReduceSum": "Sum reduction",
         "SoftmaxCrossEntropy": "Softmax cross entropy",
+        "SoftmaxCrossEntropyDualOutput": "Softmax cross entropy (loss + log_prob outputs)",
         "ReluGrad": "ReLU gradient",
         # Training operators (custom domain: com.microsoft)
         "InPlaceAccumulatorV2": "Gradient accumulation with lazy reset (com.microsoft)",
