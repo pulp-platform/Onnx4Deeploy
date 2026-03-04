@@ -77,3 +77,16 @@ def mibminet_config():
         "Nf2": 16,
         "opset_version": 12,
     }
+
+
+@pytest.fixture
+def simplemlp_config():
+    """Default configuration for Simple MLP model."""
+    return {
+        "batch_size": 1,
+        "input_height": 8,
+        "input_width": 8,
+        "hidden_size": 8,
+        "num_classes": 10,
+        "opset_version": 17,
+    }

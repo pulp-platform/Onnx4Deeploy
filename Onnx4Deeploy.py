@@ -21,7 +21,7 @@ Usage:
 import argparse
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 from onnx4deeploy.core.optimizer_onnx import derive_optimizer_dir
 
@@ -43,6 +43,7 @@ def list_available_models():
         ResNetExporter,
         SimpleMlpExporter,
         SleepConViTExporter,
+        TinyTransformerExporter,
         TinyViTExporter,
     )
 
@@ -156,6 +157,12 @@ def list_available_models():
             "class": SimpleMlpExporter,
             "description": "Simple Multi-Layer Perceptron (Demo)",
             "input_shape": "(B, 1, 28, 28)",
+            "classes": 10,
+        },
+        "TinyTransformer": {
+            "class": TinyTransformerExporter,
+            "description": "Tiny Patch Transformer for MNIST (~10K params, fast compile)",
+            "input_shape": "(B, 16, 49)",
             "classes": 10,
         },
         "LightweightCNN": {
@@ -288,6 +295,8 @@ def generate_model(
     dataset: str = "random",
     data_path: Optional[str] = None,
     data_size: Optional[int] = None,
+    learning_rate: Optional[float] = None,
+    classes: Optional[List[int]] = None,
 ):
     """Generate model ONNX"""
     print(f"\n{'='*70}")
@@ -358,12 +367,16 @@ def generate_model(
             exporter._config_overrides["n_batches"] = n_batches
             exporter._config_overrides["n_accum"] = n_accum
             exporter._config_overrides["batch_size"] = batch_size
+            if learning_rate is not None:
+                exporter._config_overrides["learning_rate"] = learning_rate
         # Dataset selection applies to both infer and train data generation
         exporter._config_overrides["dataset"] = dataset
         if data_path is not None:
             exporter._config_overrides["data_path"] = data_path
         if data_size is not None:
             exporter._config_overrides["data_size"] = data_size
+        if classes is not None:
+            exporter._config_overrides["classes"] = classes
 
         # Apply model-specific configuration if available
         if "config" in models[model_key]:
@@ -603,6 +616,25 @@ Examples:
         "loss descends as the network repeatedly sees the same images. "
         "Rule of thumb: set --n-batches to at least 4×N for visible convergence.",
     )
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=None,
+        dest="learning_rate",
+        metavar="LR",
+        help="(train mode) SGD learning rate. Overrides the exporter's default "
+        "(typically 0.001). Example: --lr 0.05.",
+    )
+    parser.add_argument(
+        "--classes",
+        type=int,
+        nargs="+",
+        default=None,
+        dest="classes",
+        metavar="C",
+        help="(mnist) Restrict training to specific digit classes. "
+        "Example: --classes 0 8  trains a binary 0-vs-8 classifier.",
+    )
 
     # Other options
     parser.add_argument("--examples", action="store_true", help="Show usage examples")
@@ -661,6 +693,8 @@ Examples:
             dataset=args.dataset,
             data_path=args.data_path,
             data_size=args.data_size,
+            learning_rate=args.learning_rate,
+            classes=args.classes,
         )
 
 

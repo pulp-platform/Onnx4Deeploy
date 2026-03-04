@@ -118,18 +118,29 @@ class MNISTDataSource(DataSource):
         data_path: Optional[str] = None,
         split: str = "train",
         data_size: Optional[int] = None,
+        classes: Optional[List[int]] = None,
     ):
         self.data_path = data_path or "/tmp/mnist"
         self.split = split
         self.data_size = data_size
+        self.classes = classes  # if set, keep only images with these labels
         self._images: Optional[np.ndarray] = None
         self._labels: Optional[np.ndarray] = None
 
     def _ensure_loaded(self) -> None:
         if self._images is None:
             print(f"   Loading MNIST ({self.split}) from {self.data_path} ...")
-            self._images, self._labels = _load_mnist_numpy(self.data_path, self.split)
-            print(f"   MNIST loaded: {self._images.shape[0]} samples")
+            images, labels = _load_mnist_numpy(self.data_path, self.split)
+            if self.classes is not None:
+                mask = np.zeros(len(labels), dtype=bool)
+                for c in self.classes:
+                    mask |= labels == c
+                images, labels = images[mask], labels[mask]
+                print(f"   MNIST loaded: {images.shape[0]} samples  (classes={self.classes})")
+            else:
+                print(f"   MNIST loaded: {images.shape[0]} samples")
+            self._images = images
+            self._labels = labels
 
     def load_batches(
         self,
