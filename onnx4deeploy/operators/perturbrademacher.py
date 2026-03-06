@@ -54,6 +54,9 @@ class PerturbRademacherOperatorTest(BaseOperatorTest):
             "PerturbRademacher",
             inputs=["x"],
             outputs=["perturbed_x"],
+            seed=42,
+            eps=0.01,
+            idx=0,
             name="perturb_rademacher_node",
             domain="com.microsoft"
         )

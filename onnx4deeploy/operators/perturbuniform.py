@@ -57,11 +57,11 @@ class PerturbUniformOperatorTest(BaseOperatorTest):
             name="perturb_uniform_node",
             idx=0,
             seed=42,
-            eps=0.01,
+            eps=0.01*np.sqrt(3),  # Scale epsilon for uniform distribution
             low=-np.sqrt(3),
             high=np.sqrt(3),
             # dtype=dtype,
-            doc_string="y = x + epsilon * RandomUniform(x, seed)",
+            doc_string="y = x + eps * RandomUniform(x, seed)",
             domain="com.microsoft"
         )
 

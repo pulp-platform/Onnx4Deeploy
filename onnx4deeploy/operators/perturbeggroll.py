@@ -48,8 +48,11 @@ class PerturbEggrollOperatorTest(BaseOperatorTest):
         perturbed_x_tensor = helper.make_tensor_value_info(
             "perturbed_x", TensorProto.FLOAT, self.input_shape
         )
-
-        epsilon = 0.01  # Example scaling factor for the perturbation
+   
+        normal_epsilon = 0.01
+        uniform_epsilon = 0.01 * np.sqrt(3)
+        rademacher_epsilon = 0.01 
+        
 
         # Shape annotation for intermediate outputs
         a_shape = [self.input_shape[0], 1]
@@ -131,7 +134,7 @@ class PerturbEggrollOperatorTest(BaseOperatorTest):
             name=f"eggroll_gemm_perturb_x",
             transA=0,
             transB=1,
-            alpha=epsilon,
+            alpha=uniform_epsilon,
             beta=0
         )
         # Graph

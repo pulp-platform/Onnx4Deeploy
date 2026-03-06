@@ -53,6 +53,9 @@ class PerturbTriangleOperatorTest(BaseOperatorTest):
             "PerturbTriangle",
             inputs=["x"],
             outputs=["perturbed_x"],
+            seed=42,
+            eps=0.01*np.sqrt(6),  # Scale epsilon for triangle distribution
+            idx=0,
             name="perturb_triangle_node",
             domain="com.microsoft"
         )

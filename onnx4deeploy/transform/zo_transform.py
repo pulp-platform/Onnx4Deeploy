@@ -236,6 +236,7 @@ def inject_perturbation_nodes(
                                 outputs=[f"a_{perturbed_tensor_name}"],
                                 name=f"gen_eggroll_noise_a_{perturbed_tensor_name}",
                                 seed=seed,
+                                eps=epsilon,
                                 idx=perturbation_counter,
                                 domain="com.microsoft",
                                 doc_string="a = RandomRademacher(x[0], seed)"
@@ -247,6 +248,7 @@ def inject_perturbation_nodes(
                                 outputs=[f"b_{perturbed_tensor_name}"],
                                 name=f"gen_eggroll_noise_b_{perturbed_tensor_name}",
                                 seed=seed,
+                                eps=epsilon,
                                 idx=perturbation_counter,
                                 domain="com.microsoft",
                                 doc_string="b = RandomRademacher(x[1:], seed)"
