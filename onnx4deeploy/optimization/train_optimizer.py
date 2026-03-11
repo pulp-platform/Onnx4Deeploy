@@ -48,7 +48,6 @@ def run_train_onnx_optimization(
     from ..io.model_io import compare_onnx_models
 
     # Import from this package
-    from ..transform.model_transform import split_convgrad_nodes
     from .graph_cleaner import canonicalize_ms_training_ops_file, remove_identity_nodes
     from .shape_optimizer import convert_reducesum_to_reshape
     from .trainOptimization import (
@@ -129,8 +128,8 @@ def run_train_onnx_optimization(
     rename_softmaxgrad_op(onnx_output_file, onnx_output_file)
     print(f"✅ Successfully renamed SoftmaxGrad nodes. Saved as {onnx_output_file}")
 
-    split_convgrad_nodes(onnx_output_file, onnx_output_file)
-    print(f"✅ Successfully split ConvGrad nodes into ConvGradX/W/B. Saved as {onnx_output_file}")
+    # ConvGrad nodes are left as-is: Deeploy maps 'ConvGrad' directly
+    # via the same ConvGradXW Layer infrastructure (no rename needed).
 
     # Issue 5: Keep loss output from SoftmaxCrossEntropyLoss (both loss + log_prob)
     # remove_softmax_loss_outputs(onnx_output_file, onnx_output_file)

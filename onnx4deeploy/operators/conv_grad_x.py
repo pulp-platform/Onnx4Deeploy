@@ -47,26 +47,20 @@ class ConvGradXOperatorTest(BaseOperatorTest):
 
     def generate_inputs(self) -> Dict[str, np.ndarray]:
         """Generate random gradient and weight data."""
+        np.random.seed(42)
         return {
             "output_grad": np.random.randn(*self.output_grad_shape).astype(np.float32),
+            "weight": np.random.randn(*self.weight_shape).astype(np.float32),
         }
 
     def create_onnx_graph(self, inputs: Dict[str, np.ndarray]):
         """Create ONNX graph for ConvGradX operator."""
-        # Generate weight as a constant
-        weight = np.random.randn(*self.weight_shape).astype(np.float32)
-
-        # Input tensor
+        # Input tensors
         output_grad_tensor = helper.make_tensor_value_info(
             "output_grad", TensorProto.FLOAT, self.output_grad_shape
         )
-
-        # Weight as constant
-        weight_constant = helper.make_tensor(
-            name="weight",
-            data_type=TensorProto.FLOAT,
-            dims=self.weight_shape,
-            vals=weight.flatten().tolist(),
+        weight_tensor = helper.make_tensor_value_info(
+            "weight", TensorProto.FLOAT, self.weight_shape
         )
 
         # Output tensor
@@ -87,13 +81,12 @@ class ConvGradXOperatorTest(BaseOperatorTest):
             group=self.group,
         )
 
-        # Graph
+        # Graph (weight is now a graph input, not an initializer)
         graph = helper.make_graph(
             [convgradx_node],
             "convgradx_graph",
-            [output_grad_tensor],
+            [output_grad_tensor, weight_tensor],
             [input_grad_tensor],
-            [weight_constant],
         )
 
         return graph
@@ -125,10 +118,7 @@ class ConvGradXOperatorTest(BaseOperatorTest):
     def compute_expected_output(self, inputs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
         """Compute expected output using NumPy."""
         output_grad = inputs["output_grad"]
-
-        # Get weight from graph initializer (we need to regenerate it with same seed)
-        np.random.seed(42)  # Use a consistent seed
-        weight = np.random.randn(*self.weight_shape).astype(np.float32)
+        weight = inputs["weight"]
 
         batch, out_ch, out_h, out_w = self.output_grad_shape
         out_ch_w, in_ch_per_group_from_weight, kernel_h, kernel_w = self.weight_shape

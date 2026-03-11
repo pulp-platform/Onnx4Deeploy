@@ -17,8 +17,12 @@ from .conv2d import Conv2DOperatorTest
 from .conv_grad_b import ConvGradBOperatorTest
 from .conv_grad_w import ConvGradWOperatorTest
 from .conv_grad_x import ConvGradXOperatorTest
+from .conv_grad_xw import ConvGradXWOperatorTest
+from .conv_grad_xwb import ConvGradXWBOperatorTest
+from .gelu_grad import GeluGradOperatorTest
 from .gemm import GemmOperatorTest
 from .groupnorm import GroupNormOperatorTest
+from .groupnorm_grad import GroupNormGradOperatorTest
 from .groupnorm_grad_b import GroupNormGradBOperatorTest
 from .groupnorm_grad_w import GroupNormGradWOperatorTest
 from .groupnorm_grad_w_h2 import GroupNormGradWH2OperatorTest
@@ -29,6 +33,7 @@ from .layernorm import LayerNormOperatorTest
 from .layernorm_grad import LayerNormGradOperatorTest
 from .matmul import MatMulOperatorTest
 from .maxpool import MaxPoolOperatorTest
+from .maxpool_grad import MaxPoolGradOperatorTest
 from .reducesum import ReduceSumOperatorTest
 from .relu import ReluOperatorTest
 from .relu_exporter import ReluExporter
@@ -69,6 +74,7 @@ __all__ = [
     "LayerNormGradOperatorTest",
     "GroupNormOperatorTest",
     "GroupNormH2OperatorTest",
+    "GroupNormGradOperatorTest",
     "GroupNormGradBOperatorTest",
     "GroupNormGradWOperatorTest",
     "GroupNormGradXOperatorTest",
@@ -76,5 +82,9 @@ __all__ = [
     "Conv2DOperatorTest",
     "ConvGradXOperatorTest",
     "ConvGradWOperatorTest",
+    "ConvGradXWOperatorTest",
+    "ConvGradXWBOperatorTest",
     "ConvGradBOperatorTest",
+    "GeluGradOperatorTest",
+    "MaxPoolGradOperatorTest",
 ]

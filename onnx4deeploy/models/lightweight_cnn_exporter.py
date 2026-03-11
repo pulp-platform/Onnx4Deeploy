@@ -47,9 +47,19 @@ class LightweightCnnExporter(BaseONNXExporter):
             "opset_version": 17,
             "dropout": 0.0,  # No dropout for inference
             # Training configuration
-            "training_strategy": "full",  # Options: "full", "last_layer", "custom"
+            "training_strategy": "full",  # Options: "full", "conv_only", "last_layer", "custom"
             "custom_trainable_params": [],
+            "learning_rate": 0.001,
+            "n_accum": 1,
+            # Data source configuration
+            "dataset": "random",
+            "data_path": None,
+            "data_split": "train",
+            "data_size": None,
         }
+
+        if hasattr(self, "_config_overrides") and self._config_overrides:
+            config.update(self._config_overrides)
 
         self.model_config = config
         return config
@@ -87,46 +97,54 @@ class LightweightCnnExporter(BaseONNXExporter):
         """
         Get list of trainable parameter names for Lightweight CNN.
 
-        Supports multiple training strategies:
-        - "full": Train all parameters (default)
-        - "last_layer": Only train the final classification layer
-        - "custom": Use custom_trainable_params from config
+        Uses pattern-based lambda filtering (never hardcoded ONNX names).
 
-        Args:
-            all_param_names: List of all parameter names in the model
-
-        Returns:
-            List of parameter names that should be trainable
+        Strategies:
+        - "full":       Train everything (default, PULP-safe)
+        - "conv_only":  Freeze fc layer; train only conv weights/biases
+        - "last_layer": Freeze all conv; train only fc*
+        - "custom":     Explicit list from config["custom_trainable_params"]
         """
         strategy = self.config.get("training_strategy", "full")
 
-        # Define training strategies
-        strategy_params = {
-            "full": all_param_names,  # Train everything
-            "last_layer": [
-                "fc.weight",
-                "fc.bias",
-            ],
-            "custom": self.config.get("custom_trainable_params", []),
+        _FREEZE = {
+            "full": lambda n: False,
+            "conv_only": lambda n: n.startswith("fc"),
+            "last_layer": lambda n: not n.startswith("fc"),
+            "custom": lambda n: n not in self.config.get("custom_trainable_params", []),
         }
 
-        # Get trainable params based on strategy
-        if strategy not in strategy_params:
-            print(f"⚠️  Unknown training strategy '{strategy}', using 'full' as fallback")
+        if strategy not in _FREEZE:
+            print(f"⚠️  Unknown strategy '{strategy}', using 'full'")
             strategy = "full"
 
-        trainable_params = strategy_params[strategy]
+        requires_grad = [n for n in all_param_names if not _FREEZE[strategy](n)]
+        frozen = [n for n in all_param_names if _FREEZE[strategy](n)]
 
-        # Filter to only include params that exist in the model
-        requires_grad = [name for name in all_param_names if name in trainable_params]
-
-        # Print strategy info
         print(f"\n🎯 Training Strategy: '{strategy}'")
-        print(f"   Total params in model: {len(all_param_names)}")
-        print(f"   Params to train: {len(requires_grad)}")
-        print(f"   Frozen params: {len(all_param_names) - len(requires_grad)}")
+        print(
+            f"   Total: {len(all_param_names)}  Trainable: {len(requires_grad)}  Frozen: {len(frozen)}"
+        )
+        if frozen:
+            print(f"   Frozen (→ constant): {frozen}")
 
         return requires_grad
+
+    def get_data_source(self):
+        """Return data source for training mini-batch generation."""
+        dataset = (self.config or self.model_config or {}).get("dataset", "random")
+        if dataset == "mnist":
+            from ..data.mnist_datasource import MNISTDataSource
+
+            cfg = self.config or self.model_config or {}
+            return MNISTDataSource(
+                data_path=cfg.get("data_path", None),
+                split=cfg.get("data_split", "train"),
+                data_size=cfg.get("data_size", None),
+            )
+        from ..data.random_datasource import RandomDataSource
+
+        return RandomDataSource()
 
     def _get_config_string(self) -> str:
         """
@@ -179,3 +197,157 @@ class LightweightCnnExporter(BaseONNXExporter):
         print("  ✅ Saved test data (PyTorch reference):")
         print(f"     Input:  {save_path / 'inputs.npz'} shape={test_input.shape}")
         print(f"     Output: {save_path / 'outputs.npz'} shape={test_output.shape}")
+
+    def create_training_test_data(
+        self, n_batches: int = None, num_data_inputs: int = 2, n_accum: int = None
+    ) -> None:
+        """
+        Save multi-batch training reference data (new format, no grad-acc-buf entries).
+
+        grad-acc-buf entries are omitted — the C harness zero-inits them via memset
+        after InitTrainingNetwork(). Only unique samples are stored (effective_data_size);
+        the C harness cycles via mb % TRAINING_DATA_SIZE.
+        """
+        import onnx
+        import onnxruntime as ort
+        from onnx import numpy_helper
+
+        _GRAD_ACC = "_grad.accumulation.buffer"
+
+        if n_batches is None:
+            n_batches = self.config.get("n_batches", 4)
+        if n_accum is None:
+            n_accum = int(self.config.get("n_accum", 1))
+        if n_batches % n_accum != 0:
+            n_batches = (n_batches // n_accum) * n_accum or n_accum
+            print(f"   ⚠️  n_batches adjusted to {n_batches} (divisible by n_accum={n_accum})")
+        n_steps = n_batches // n_accum
+
+        save_dir = Path(self.paths["output_dir"])
+        save_dir.mkdir(parents=True, exist_ok=True)
+
+        input_shape = self.get_input_shape()
+        num_classes = self.config.get("num_classes", 10)
+        learning_rate = float(self.config.get("learning_rate", 0.001))
+
+        print(
+            f"   Training sim: n_batches={n_batches}  n_accum={n_accum}  n_steps={n_steps}  lr={learning_rate}"
+        )
+
+        _data_size_cfg = self.config.get("data_size", None)
+        effective_data_size = (
+            int(_data_size_cfg)
+            if (_data_size_cfg and int(_data_size_cfg) < n_batches)
+            else n_batches
+        )
+
+        data_source = self.get_data_source()
+        test_inputs, labels_list = data_source.load_batches(
+            effective_data_size, input_shape, num_classes, seed=42
+        )
+
+        infer_model = onnx.load(self.paths["network_infer"])
+        init_map: dict = {
+            init.name: numpy_helper.to_array(init) for init in infer_model.graph.initializer
+        }
+
+        train_model_onnx = onnx.load(self.paths["network_train"])
+        grad_tensor_map: dict = {}
+        for node in train_model_onnx.graph.node:
+            if "InPlaceAccumulator" in node.op_type and len(node.input) >= 2:
+                grad_tensor_name = node.input[1]
+                if grad_tensor_name.endswith("_grad"):
+                    grad_tensor_map[grad_tensor_name[:-5]] = grad_tensor_name
+
+        for grad_name in grad_tensor_map.values():
+            vi = onnx.helper.make_tensor_value_info(grad_name, onnx.TensorProto.FLOAT, None)
+            train_model_onnx.graph.output.append(vi)
+
+        session = ort.InferenceSession(
+            train_model_onnx.SerializeToString(), providers=["CPUExecutionProvider"]
+        )
+        session_output_names = [o.name for o in session.get_outputs()]
+        print(f"   Training model inputs:  {[i.name for i in session.get_inputs()]}")
+
+        current_weights = {k: v.copy() for k, v in init_map.items()}
+        all_losses: list = []
+        feed_mb0: dict = {}
+
+        for update_step in range(n_steps):
+            accumulated_grads = {
+                pname: np.zeros_like(current_weights[pname])
+                for pname in grad_tensor_map
+                if pname in current_weights
+            }
+            for accum_step in range(n_accum):
+                mb = update_step * n_accum + accum_step
+                feed = {}
+                for inp in session.get_inputs():
+                    name = inp.name
+                    shape = [d for d in inp.shape if isinstance(d, int) and d > 0]
+                    if inp.type == "tensor(int64)":
+                        feed[name] = labels_list[mb % effective_data_size]
+                    elif inp.type == "tensor(bool)":
+                        feed[name] = np.array([accum_step == 0])
+                    elif name in current_weights:
+                        feed[name] = current_weights[name]
+                    elif _GRAD_ACC in name:
+                        feed[name] = np.zeros(shape, dtype=np.float32)
+                    elif shape == list(input_shape):
+                        feed[name] = test_inputs[mb % effective_data_size]
+                    else:
+                        feed[name] = np.zeros(shape, dtype=np.float32)
+                if mb == 0:
+                    feed_mb0 = dict(feed)
+                raw_outputs = session.run(None, feed)
+                outputs_raw = dict(zip(session_output_names, raw_outputs))
+                for out_name, out_val in outputs_raw.items():
+                    if "loss" in out_name.lower() and "grad" not in out_name.lower():
+                        all_losses.append(float(np.array(out_val).flatten()[0]))
+                        break
+                for pname, grad_name in grad_tensor_map.items():
+                    if grad_name in outputs_raw and pname in accumulated_grads:
+                        accumulated_grads[pname] += outputs_raw[grad_name]
+            for pname, acc_grad in accumulated_grads.items():
+                current_weights[pname] -= learning_rate * acc_grad
+
+        outputs_dict: dict = {k: v for k, v in current_weights.items()}
+        outputs_dict["loss"] = np.array(all_losses, dtype=np.float32)
+        print(f"   Collected {len(all_losses)} reference losses: {all_losses}")
+
+        final_model = onnx.load(self.paths["network"])
+        final_input_names = [inp.name for inp in final_model.graph.input]
+        grad_acc_names = {n for n in final_input_names if _GRAD_ACC in n}
+        non_grad_names = [n for n in final_input_names if n not in grad_acc_names]
+
+        save_dict: dict = {}
+        for npz_idx, name in enumerate(non_grad_names):
+            if name in feed_mb0:
+                save_dict[f"arr_{npz_idx:04d}"] = feed_mb0[name]
+            else:
+                print(f"   ⚠️  '{name}' not found in feed — skipping")
+
+        session_type: dict = {inp.name: inp.type for inp in session.get_inputs()}
+        data_names = non_grad_names[:num_data_inputs]
+        for mb in range(1, effective_data_size):
+            for buf_idx, data_name in enumerate(data_names):
+                inp_type = session_type.get(data_name, "tensor(float)")
+                if inp_type == "tensor(int64)":
+                    save_dict[f"mb{mb}_arr_{buf_idx:04d}"] = labels_list[mb]
+                else:
+                    save_dict[f"mb{mb}_arr_{buf_idx:04d}"] = test_inputs[mb]
+
+        save_dict["meta_data_size"] = np.array([effective_data_size], dtype=np.int32)
+        save_dict["meta_n_batches"] = np.array([n_batches], dtype=np.int32)
+        np.savez(save_dir / "inputs.npz", **save_dict)
+        print(
+            f"   ✅ inputs.npz  — {len(non_grad_names)} base tensors "
+            f"({len(grad_acc_names)} grad-acc-buf(s) omitted) "
+            f"+ {(effective_data_size - 1) * num_data_inputs} unique DATA entries"
+        )
+
+        np.savez(save_dir / "outputs.npz", **outputs_dict)
+        n_updated = sum(1 for k in outputs_dict if k in init_map)
+        print(
+            f"   ✅ outputs.npz — {len(outputs_dict)} tensors ({n_updated} updated params + loss)"
+        )

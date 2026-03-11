@@ -121,6 +121,24 @@ class BaseONNXExporter(ABC):
         """
         return all_param_names
 
+    def get_loss_type(self):
+        """
+        Return the ORT training loss type used by generate_artifacts().
+
+        Default: CrossEntropyLoss (for all classification models).
+        Override to return artifacts.LossType.MSELoss for reconstruction tasks
+        (e.g., autoencoders for the MLperf Tiny Anomaly Detection benchmark),
+        or artifacts.LossType.BCEWithLogitsLoss for binary classification.
+
+        Available types: CrossEntropyLoss | MSELoss | BCEWithLogitsLoss | L1Loss
+
+        Returns:
+            onnxruntime.training.artifacts.LossType
+        """
+        from onnxruntime.training import artifacts
+
+        return artifacts.LossType.CrossEntropyLoss
+
     def get_inference_pipeline(self) -> "OptimizationPipeline":
         """
         Get the optimization pipeline for inference mode.
@@ -470,9 +488,19 @@ class BaseONNXExporter(ABC):
             ) from e
         print_model_info(self.paths["network_infer"])
 
-        # Determine trainable / frozen parameters
+        # Determine trainable / frozen parameters.
+        # BatchNorm running statistics (running_mean, running_var, num_batches_tracked)
+        # are non-differentiable buffers updated via EMA, not backprop.  They must be
+        # excluded from BOTH lists:
+        #   - in requires_grad → generate_artifacts tries to build gradient nodes → crash
+        #   - in frozen_params → inlined as constants → can't be updated at inference
+        _BN_BUFFERS = ("running_mean", "running_var", "num_batches_tracked")
         all_param_names = [init.name for init in onnx_model.graph.initializer]
+        all_param_names = [
+            n for n in all_param_names if not any(n.endswith(s) for s in _BN_BUFFERS)
+        ]
         requires_grad = self.get_trainable_params(all_param_names)
+        requires_grad = [n for n in requires_grad if not any(n.endswith(s) for s in _BN_BUFFERS)]
         frozen_params = [name for name in all_param_names if name not in requires_grad]
 
         print(f"\n🔹 Trainable parameters: {len(requires_grad)}")
@@ -488,7 +516,7 @@ class BaseONNXExporter(ABC):
         artifacts.generate_artifacts(
             onnx_model,
             optimizer=artifacts.OptimType.SGD,
-            loss=artifacts.LossType.CrossEntropyLoss,
+            loss=self.get_loss_type(),
             requires_grad=requires_grad,
             frozen_params=frozen_params,
             artifact_directory=self.paths["output_dir"],
@@ -536,6 +564,86 @@ class BaseONNXExporter(ABC):
 
         return self.paths["network"]
 
+    # ---------------------------------------------------------------------- #
+    # Training test-data helpers                                             #
+    # ---------------------------------------------------------------------- #
+
+    _GRAD_ACC_SUFFIX = "_grad.accumulation.buffer"
+
+    def _load_init_map(self, onnx_path: str) -> dict:
+        """
+        Load model initializers from an ONNX file into a ``{name: np.ndarray}`` dict.
+
+        Used by ``create_training_test_data`` (and subclass overrides) to retrieve
+        the initial parameter values that match the checkpoint produced by
+        ``generate_artifacts``.
+
+        Args:
+            onnx_path: Path to the ONNX model whose initializers should be loaded.
+
+        Returns:
+            Dict mapping initializer name → numpy array.
+        """
+        import onnx
+        from onnx import numpy_helper
+
+        model = onnx.load(onnx_path)
+        return {init.name: numpy_helper.to_array(init) for init in model.graph.initializer}
+
+    def _build_input_feed(
+        self,
+        session: "ort.InferenceSession",
+        param_values: dict,
+        test_input: "np.ndarray",
+        labels: "np.ndarray",
+        lazy_reset_grad: bool = True,
+    ) -> dict:
+        """
+        Build a complete ORT input feed dict for one forward+backward pass.
+
+        Assignment rules applied in priority order:
+
+        1. ``tensor(int64)``             → *labels*
+        2. ``tensor(bool)``              → ``[lazy_reset_grad]``  (InPlaceAccumulatorV2 ctrl)
+        3. name in *param_values*        → current parameter value
+        4. name ends with ``_grad.accumulation.buffer`` → zeros (accumulator init)
+        5. shape matches ``get_input_shape()``           → *test_input*
+        6. anything else                 → zeros with the correct shape
+
+        Args:
+            session:          Active ORT InferenceSession for the training model.
+            param_values:     Dict of current parameter tensors (may be initial weights
+                              or mid-training weights for gradient-accumulation loops).
+            test_input:       Data input array for this mini-batch.
+            labels:           Label array for this mini-batch.
+            lazy_reset_grad:  Value written to any ``tensor(bool)`` graph input.
+                              Pass ``True`` on the first accumulation step, ``False``
+                              on subsequent steps.
+
+        Returns:
+            Dict mapping every session input name → numpy array.
+        """
+        import numpy as np
+
+        input_shape = self.get_input_shape()
+        feed: dict = {}
+        for inp in session.get_inputs():
+            name = inp.name
+            shape = [d for d in inp.shape if isinstance(d, int) and d > 0]
+            if inp.type == "tensor(int64)":
+                feed[name] = labels
+            elif inp.type == "tensor(bool)":
+                feed[name] = np.array([lazy_reset_grad])
+            elif name in param_values:
+                feed[name] = param_values[name]
+            elif self._GRAD_ACC_SUFFIX in name:
+                feed[name] = np.zeros(shape, dtype=np.float32)
+            elif shape == list(input_shape):
+                feed[name] = test_input
+            else:
+                feed[name] = np.zeros(shape, dtype=np.float32)
+        return feed
+
     def create_training_test_data(self) -> None:
         """
         Generate reference test data for one complete training step.
@@ -544,202 +652,74 @@ class BaseONNXExporter(ABC):
         (data input + labels + all initial weight/bias parameters), then applies
         SGD manually to compute updated parameter values.
 
-        Initial parameter values are read from network_infer.onnx initializers,
-        which exactly match the checkpoint values produced by generate_artifacts.
+        Initial parameter values are read from ``network_infer.onnx`` initializers,
+        which exactly match the checkpoint values produced by ``generate_artifacts``.
+        If ``network_infer.onnx`` is unavailable the initializers are taken from
+        ``network_train.onnx`` instead.
 
         Saved files
         -----------
-        inputs.npz  : {<input_name>: float32, <labels_name>: int64,
-                       <param_name>: float32, ...}   ← ALL graph inputs
-        outputs.npz : {<param_name>: float32, ..., loss: float32}
-                       param tensors  — updated via SGD (param - lr * grad)
-                       loss           — scalar cross-entropy loss
+        inputs.npz  : ALL graph inputs — data, labels, initial params, ctrl tensors
+        outputs.npz : SGD-updated parameter tensors + scalar ``loss``
         """
         from pathlib import Path
 
         import numpy as np
-        import onnx
         import onnxruntime as ort
-        from onnx import numpy_helper
 
-        try:
-            input_shape = self.get_input_shape()
-            input_shape[0]
-            num_classes = self.config.get("num_classes", 2)
-            learning_rate = float(self.config.get("learning_rate", 0.001))
+        input_shape = self.get_input_shape()
+        num_classes = self.config.get("num_classes", 2)
+        learning_rate = float(self.config.get("learning_rate", 0.001))
+        save_dir = Path(self.paths["output_dir"])
 
-            data_source = self.get_data_source()
-            _inputs, _labels = data_source.load_batches(1, input_shape, num_classes, seed=42)
-            test_input = _inputs[0]
-            labels = _labels[0]
+        data_source = self.get_data_source()
+        test_inputs, labels_list = data_source.load_batches(1, input_shape, num_classes, seed=42)
+        test_input, labels = test_inputs[0], labels_list[0]
 
-            save_dir = Path(self.paths["output_dir"])
+        # Prefer network_infer.onnx: its initializers are guaranteed to match the
+        # checkpoint produced by generate_artifacts.  Fall back to network_train.onnx
+        # initializers when network_infer.onnx is not available (e.g. custom workflows).
+        infer_path = self.paths.get("network_infer", "")
+        init_source = (
+            infer_path if infer_path and os.path.exists(infer_path) else self.paths["network_train"]
+        )
+        init_map = self._load_init_map(init_source)
 
-            # Read initial parameter values from the inference model.
-            # generate_artifacts uses these initializers as the checkpoint initial state,
-            # so they are guaranteed to match the training model's parameter inputs.
-            infer_model = onnx.load(self.paths["network_infer"])
-            init_map: dict = {
-                init.name: numpy_helper.to_array(init) for init in infer_model.graph.initializer
-            }
+        session = ort.InferenceSession(
+            self.paths["network_train"], providers=["CPUExecutionProvider"]
+        )
+        print(
+            f"   Training model inputs ({len(session.get_inputs())}): "
+            f"{[i.name for i in session.get_inputs()]}"
+        )
 
-            # Run the training model with ORT InferenceSession.
-            # network_train.onnx is pre-optimization and ORT-compatible.
-            session = ort.InferenceSession(
-                self.paths["network_train"], providers=["CPUExecutionProvider"]
-            )
+        feed = self._build_input_feed(session, init_map, test_input, labels)
+        outputs_raw = dict(zip([o.name for o in session.get_outputs()], session.run(None, feed)))
 
-            # Print all graph input names for visibility
-            all_input_names = [inp.name for inp in session.get_inputs()]
-            print(f"   Training model inputs ({len(all_input_names)}): {all_input_names}")
+        # SGD update: updated = param - lr * grad
+        # ORT names gradient outputs as "<param_name>_grad".
+        outputs_dict: dict = {}
+        for param_name, param_val in init_map.items():
+            if (param_name + "_grad") in outputs_raw:
+                outputs_dict[param_name] = (
+                    param_val - learning_rate * outputs_raw[param_name + "_grad"]
+                )
+        for out_name, out_val in outputs_raw.items():
+            if "loss" in out_name.lower() and "grad" not in out_name.lower():
+                outputs_dict["loss"] = np.atleast_1d(np.array(out_val, dtype=np.float32))
+                break
+        if not outputs_dict:
+            outputs_dict = dict(outputs_raw)
 
-            # Build a complete input feed for every graph input:
-            #   tensor(int64)                -> labels
-            #   tensor(bool)                 -> lazy_reset_grad = True (first step)
-            #   name in init_map             -> initial parameter value
-            #   *_grad.accumulation.buffer   -> zeros (gradient accum buffer init)
-            #   shape == input_shape         -> data input
-            #   anything else                -> zeros with correct shape
-            inputs_dict: dict = {}
-            for inp in session.get_inputs():
-                name = inp.name
-                shape = [d for d in inp.shape if isinstance(d, int) and d > 0]
-                if inp.type == "tensor(int64)":
-                    inputs_dict[name] = labels
-                elif inp.type == "tensor(bool)":
-                    # lazy_reset_grad=True resets accumulator at the start of each step
-                    inputs_dict[name] = np.array([True])
-                elif name in init_map:
-                    inputs_dict[name] = init_map[name]
-                elif "_grad.accumulation.buffer" in name:
-                    # Gradient accumulation buffers are initialized to zero
-                    inputs_dict[name] = np.zeros(shape, dtype=np.float32)
-                elif shape == list(input_shape):
-                    inputs_dict[name] = test_input
-                else:
-                    inputs_dict[name] = np.zeros(shape, dtype=np.float32)
+        np.savez(save_dir / "inputs.npz", **feed)
+        n_params = sum(1 for k in feed if k in init_map)
+        print(f"   ✅ inputs.npz  — {len(feed)} tensors (data + labels + {n_params} params)")
 
-            # Execute forward + backward
-            raw_outputs = session.run(None, inputs_dict)
-            output_names = [o.name for o in session.get_outputs()]
-            outputs_raw = dict(zip(output_names, raw_outputs))
-
-            # Compute updated parameters: updated = param - lr * grad
-            # ORT names gradient outputs as "<param_name>_grad"
-            outputs_dict: dict = {}
-            for param_name, param_val in init_map.items():
-                grad_name = param_name + "_grad"
-                if grad_name in outputs_raw:
-                    outputs_dict[param_name] = param_val - learning_rate * outputs_raw[grad_name]
-
-            # Include scalar loss
-            for out_name, out_val in outputs_raw.items():
-                if "loss" in out_name.lower() and "grad" not in out_name.lower():
-                    outputs_dict["loss"] = np.atleast_1d(np.array(out_val, dtype=np.float32))
-                    break
-
-            if not outputs_dict:
-                # Fallback: save raw outputs if no gradient pattern matched
-                outputs_dict = {k: v for k, v in outputs_raw.items()}
-
-            # Save: inputs include ALL graph inputs (data + labels + all params)
-            np.savez(save_dir / "inputs.npz", **inputs_dict)
-            n_params = sum(1 for k in inputs_dict if k in init_map)
-            print(
-                f"   ✅ inputs.npz  — {len(inputs_dict)} tensors "
-                f"(data + labels + {n_params} params)"
-            )
-
-            np.savez(save_dir / "outputs.npz", **outputs_dict)
-            n_updated = sum(1 for k in outputs_dict if k in init_map)
-            print(
-                f"   ✅ outputs.npz — {len(outputs_dict)} tensors "
-                f"({n_updated} updated params + loss)"
-            )
-
-        except Exception as e:
-            print(f"   ⚠️  ORT InferenceSession failed ({e}); using fallback...")
-            self._create_test_data_fallback()
-
-    def _create_test_data_fallback(self) -> None:
-        """
-        Fallback: load initial params from network_train.onnx initializers and
-        save all graph inputs including parameters.
-
-        Saved files
-        -----------
-        inputs.npz  : {<name>: tensor, ...}  — ALL graph inputs including params
-        outputs.npz : {<param_name>: float32, ...}  — updated params or raw outputs
-        """
-        from pathlib import Path
-
-        import numpy as np
-        import onnx
-        import onnxruntime as ort
-        from onnx import numpy_helper
-
-        try:
-            input_shape = self.get_input_shape()
-            input_shape[0]
-            num_classes = self.config.get("num_classes", 2)
-            learning_rate = float(self.config.get("learning_rate", 0.001))
-
-            data_source = self.get_data_source()
-            _inputs, _labels = data_source.load_batches(1, input_shape, num_classes, seed=42)
-            test_input = _inputs[0]
-            labels = _labels[0]
-
-            save_dir = Path(self.paths["output_dir"])
-
-            # Read initial param values from network_train initializers
-            train_model = onnx.load(self.paths["network_train"])
-            init_map = {
-                init.name: numpy_helper.to_array(init) for init in train_model.graph.initializer
-            }
-
-            session = ort.InferenceSession(
-                self.paths["network_train"], providers=["CPUExecutionProvider"]
-            )
-
-            # Build complete input feed including all parameters
-            inputs_dict: dict = {}
-            for inp in session.get_inputs():
-                name = inp.name
-                if inp.type == "tensor(int64)":
-                    inputs_dict[name] = labels
-                elif name in init_map:
-                    inputs_dict[name] = init_map[name]
-                else:
-                    inputs_dict[name] = test_input
-
-            raw_outputs = session.run(None, inputs_dict)
-            output_names = [o.name for o in session.get_outputs()]
-            outputs_raw = dict(zip(output_names, raw_outputs))
-
-            # Apply SGD where gradient outputs are found
-            outputs_dict: dict = {}
-            for param_name, param_val in init_map.items():
-                grad_name = param_name + "_grad"
-                if grad_name in outputs_raw:
-                    outputs_dict[param_name] = param_val - learning_rate * outputs_raw[grad_name]
-
-            for out_name, out_val in outputs_raw.items():
-                if "loss" in out_name.lower() and "grad" not in out_name.lower():
-                    outputs_dict["loss"] = np.atleast_1d(np.array(out_val, dtype=np.float32))
-                    break
-
-            if not outputs_dict:
-                outputs_dict = {k: v for k, v in outputs_raw.items()}
-
-            np.savez(save_dir / "inputs.npz", **inputs_dict)
-            n_params = sum(1 for k in inputs_dict if k in init_map)
-            print(f"   ✅ inputs.npz  — {len(inputs_dict)} tensors ({n_params} params)")
-
-            np.savez(save_dir / "outputs.npz", **outputs_dict)
-            print(f"   ✅ outputs.npz — {len(outputs_dict)} tensors")
-
-        except Exception as e:
-            print(f"   ⚠️  Fallback test data generation failed: {e}")
+        np.savez(save_dir / "outputs.npz", **outputs_dict)
+        n_updated = sum(1 for k in outputs_dict if k in init_map)
+        print(
+            f"   ✅ outputs.npz — {len(outputs_dict)} tensors ({n_updated} updated params + loss)"
+        )
 
     def create_optimizer(self) -> Optional[str]:
         """
@@ -777,14 +757,6 @@ class BaseONNXExporter(ABC):
         except Exception as e:
             print(f"   ⚠️  Optimizer ONNX generation skipped: {e}")
             return None
-
-    def _add_optimizer_nodes(self):
-        """
-        Add optimizer (SGD/Adam) nodes to the model.
-
-        Subclasses can override this to customize optimizer node addition.
-        """
-        # Default implementation - can be overridden
 
     def export(self, mode: str = "train", save_path: Optional[str] = None) -> str:
         """

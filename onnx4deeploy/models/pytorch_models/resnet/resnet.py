@@ -318,3 +318,78 @@ def resnet50(num_classes: int = 1000, input_channels: int = 3) -> ResNet:
         ResNet-50 model
     """
     return ResNet(Bottleneck, [3, 4, 6, 3], num_classes, input_channels)
+
+
+class ResNet8(nn.Module):
+    """
+    ResNet-8 for CIFAR-10 / MLperf Tiny Image Classification benchmark.
+
+    Lightweight 3-stage residual network designed for small (32×32) images.
+    Input:  (N, input_channels, 32, 32)
+    Output: (N, num_classes)
+    ~78K parameters with default channel widths.
+    """
+
+    def __init__(
+        self,
+        num_classes: int = 10,
+        input_channels: int = 3,
+        base_channels: int = 16,
+    ):
+        super(ResNet8, self).__init__()
+
+        c = base_channels  # 16 by default
+
+        # Initial 3×3 conv (no maxpool — input is only 32×32)
+        self.conv1 = nn.Conv2d(input_channels, c, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(c)
+        self.relu = nn.ReLU(inplace=False)
+
+        # Stage 1: 16 channels, stride=1
+        self.layer1 = self._make_block(c, c, stride=1)
+        # Stage 2: 32 channels, stride=2 (spatial /2)
+        self.layer2 = self._make_block(c, c * 2, stride=2)
+        # Stage 3: 64 channels, stride=2 (spatial /4)
+        self.layer3 = self._make_block(c * 2, c * 4, stride=2)
+
+        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        self.fc = nn.Linear(c * 4, num_classes)
+
+    def _make_block(self, in_ch: int, out_ch: int, stride: int) -> nn.Sequential:
+        downsample = None
+        if stride != 1 or in_ch != out_ch:
+            downsample = nn.Sequential(
+                nn.Conv2d(in_ch, out_ch, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_ch),
+            )
+        return nn.Sequential(BasicBlock(in_ch, out_ch, stride=stride, downsample=downsample))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = self.relu(self.bn1(self.conv1(x)))
+        x = self.layer1(x)
+        x = self.layer2(x)
+        x = self.layer3(x)
+        x = self.avgpool(x)
+        x = torch.flatten(x, 1)
+        x = self.fc(x)
+        return x
+
+
+def resnet8(num_classes: int = 10, input_channels: int = 3, base_channels: int = 16) -> ResNet8:
+    """
+    ResNet-8 model — MLperf Tiny Image Classification reference architecture.
+
+    Architecture: 3 single-block residual stages with channels [16, 32, 64].
+    Designed for 32×32 CIFAR-10 inputs; ~78K parameters.
+
+    Args:
+        num_classes: Number of output classes (default 10 for CIFAR-10)
+        input_channels: Number of input channels (default 3 for RGB)
+        base_channels: Base channel width (default 16)
+
+    Returns:
+        ResNet-8 model
+    """
+    return ResNet8(
+        num_classes=num_classes, input_channels=input_channels, base_channels=base_channels
+    )

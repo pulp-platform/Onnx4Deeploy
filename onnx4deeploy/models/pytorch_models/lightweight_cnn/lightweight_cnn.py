@@ -55,13 +55,13 @@ class LightweightCNN(nn.Module):
         # Input: (B, input_channels, 28, 28) -> Output: (B, 20, 12, 12)
         self.conv1 = nn.Conv2d(input_channels, 20, kernel_size=5, stride=1, padding=0)
         self.relu1 = nn.ReLU()
-        self.pool1 = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.pool1 = nn.AvgPool2d(kernel_size=2, stride=2)
 
         # Convolutional Block 2: Conv2 -> ReLU -> Pool
         # Input: (B, 20, 12, 12) -> Output: (B, 10, 6, 6)
         self.conv2 = nn.Conv2d(20, 10, kernel_size=1, stride=1, padding=0)
         self.relu2 = nn.ReLU()
-        self.pool2 = nn.MaxPool2d(kernel_size=2, stride=2)
+        self.pool2 = nn.AvgPool2d(kernel_size=2, stride=2)
 
         # Convolutional Block 3: Conv3 -> ReLU
         # Input: (B, 10, 6, 6) -> Output: (B, 12, 4, 4)

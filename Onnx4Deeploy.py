@@ -33,7 +33,9 @@ sys.path.insert(0, str(project_root))
 def list_available_models():
     """List available model exporters"""
     from onnx4deeploy.models import (
+        AutoencoderExporter,
         CCTExporter,
+        DSCNNExporter,
         EpiDeNetExporter,
         LightweightCnnExporter,
         MambaExporter,
@@ -41,6 +43,7 @@ def list_available_models():
         MobileNetV2Exporter,
         MobileViTExporter,
         ResNetExporter,
+        SimpleCnnExporter,
         SimpleMlpExporter,
         SleepConViTExporter,
         TinyTransformerExporter,
@@ -152,11 +155,66 @@ def list_available_models():
             "input_shape": "(B, 1, 3000)",
             "classes": 5,
         },
+        # ── MLperf Tiny Benchmarks ──────────────────────────────────────────
+        # IC  — Image Classification (CIFAR-10, ResNet-8)
+        "ResNet8": {
+            "class": ResNetExporter,
+            "description": "ResNet-8 (MLperf Tiny IC, CIFAR-10, ~78K params)",
+            "input_shape": "(B, 3, 32, 32)",
+            "classes": 10,
+            "config": {"variant": "resnet8", "img_size": 32, "num_classes": 10},
+        },
+        # VWW — Visual Wake Words (MobileNetV2-0.35, 96×96, 2 classes)
+        "MobileNetV2-VWW": {
+            "class": MobileNetV2Exporter,
+            "description": "MobileNetV2-0.35 (MLperf Tiny VWW, 96×96, person/not-person)",
+            "input_shape": "(B, 3, 96, 96)",
+            "classes": 2,
+            "config": {"width_mult": 0.35, "img_size": 96, "num_classes": 2},
+        },
+        # KWS — Keyword Spotting (DS-CNN-XS, MFCC 25×10, 12 classes)
+        "DSCNN": {
+            "class": DSCNNExporter,
+            "description": "DS-CNN-XS (MLperf Tiny KWS, MFCC 25×10, 12 classes, ~10K params)",
+            "input_shape": "(B, 1, 25, 10)",
+            "classes": 12,
+            "config": {"variant": "xs", "n_time": 25, "n_freq": 10},
+        },
+        # KWS full-size reference (DS-CNN-S, 49×10)
+        "DSCNN-S": {
+            "class": DSCNNExporter,
+            "description": "DS-CNN-S (MLperf Tiny KWS reference, MFCC 49×10, ~270K params)",
+            "input_shape": "(B, 1, 49, 10)",
+            "classes": 12,
+            "config": {"variant": "s", "n_time": 49, "n_freq": 10},
+        },
+        # AD  — Anomaly Detection (FC Autoencoder, 128-dim, MSE loss)
+        "Autoencoder": {
+            "class": AutoencoderExporter,
+            "description": "FC Autoencoder-tiny (MLperf Tiny AD, 128-dim, MSE loss, ~26K params)",
+            "input_shape": "(B, 128)",
+            "classes": None,
+            "config": {"variant": "tiny", "input_dim": 128},
+        },
+        # AD  — full MLperf Tiny reference autoencoder
+        "Autoencoder-MLPerf": {
+            "class": AutoencoderExporter,
+            "description": "FC Autoencoder (MLperf Tiny AD reference, 128→[128,128,128]→128)",
+            "input_shape": "(B, 128)",
+            "classes": None,
+            "config": {"variant": "mlperf", "input_dim": 128},
+        },
         # Simple Models
         "SimpleMLP": {
             "class": SimpleMlpExporter,
             "description": "Simple Multi-Layer Perceptron (Demo)",
             "input_shape": "(B, 1, 28, 28)",
+            "classes": 10,
+        },
+        "SimpleCNN": {
+            "class": SimpleCnnExporter,
+            "description": "Simple CNN (2 strided-conv + FC, no MaxPool, training-ready)",
+            "input_shape": "(B, 1, 16, 16)",
             "classes": 10,
         },
         "TinyTransformer": {
@@ -201,6 +259,7 @@ def list_available_operators():
         "Conv2D": "2D convolution (supports asymmetric padding)",
         "ConvGradX": "Convolution input gradient",
         "ConvGradW": "Convolution weight gradient",
+        "ConvGrad": "Combined convolution input + weight gradient (dX + dW [+ dB])",
         "ConvGradB": "Convolution bias gradient",
         # Others
         "ReduceSum": "Sum reduction",
@@ -234,8 +293,15 @@ def generate_operator(operator_name: str, output_path: Optional[str] = None):
         ]
 
         # Try multiple module name patterns
+        import re as _re
+
+        _snake = _re.sub(
+            r"(?<=[a-z0-9])(?=[A-Z])", "_", operator_name
+        ).lower()  # ConvGradXW → conv_grad_xw
         possible_module_names = [
             f"{operator_name.lower()}",  # relu
+            _snake,  # conv_grad_xw
+            f"{_snake}_xw",  # conv_grad → conv_grad_xw (legacy filename)
             f"{operator_name.lower()}_operator",  # relu_operator
             f"{operator_name.lower()}_exporter",  # relu_exporter
         ]
@@ -379,10 +445,10 @@ def generate_model(
         if classes is not None:
             exporter._config_overrides["classes"] = classes
 
-        # Apply model-specific configuration if available
+        # Apply model-specific configuration via _config_overrides so it survives
+        # the internal load_config() call inside export_inference/export_training().
         if "config" in models[model_key]:
-            exporter.config = exporter.load_config()
-            exporter.config.update(models[model_key]["config"])
+            exporter._config_overrides.update(models[model_key]["config"])
 
         # Export according to mode
         if mode == "infer":

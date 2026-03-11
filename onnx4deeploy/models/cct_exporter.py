@@ -57,6 +57,8 @@ class CCTExporter(BaseONNXExporter):
             "learning_rate": 0.001,
             "n_batches": 4,
             "n_accum": 1,
+            # Dataset cycling (None = store all n_batches unique samples)
+            "data_size": None,
         }
 
         # Apply any CLI overrides stored before export_training() was called.

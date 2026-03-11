@@ -2,7 +2,19 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""MobileNetV2 Model Exporter — inference + training graph support."""
+"""DS-CNN Model Exporter — MLperf Tiny Keyword Spotting (KWS) benchmark.
+
+Supports inference and full training-graph generation for Deeploy on-device training.
+
+Default configuration (DS-CNN-XS, PULP-deployable):
+  Input:  (1, 1, 25, 10)  — 1-ch MFCC, 25 time frames × 10 mel-freq bins
+  Classes: 12 (10 commands + silence + unknown)
+  base_channels: 16, n_ds_blocks: 4
+
+To reproduce the full MLperf Tiny DS-CNN-S configuration:
+  n_time=49, n_freq=10, base_channels=64
+  (Note: this will NOT fit in PULP L2 for full training; use training_strategy="last_layer")
+"""
 
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -11,11 +23,10 @@ import numpy as np
 import torch
 
 from ..core.base_exporter import BaseONNXExporter
-from .pytorch_models.mobilenet import mobilenet_v2
 
 
-class MobileNetV2Exporter(BaseONNXExporter):
-    """ONNX exporter for MobileNetV2 model (MLPerf Mobile / VWW benchmark)."""
+class DSCNNExporter(BaseONNXExporter):
+    """ONNX exporter for DS-CNN model (MLperf Tiny KWS benchmark)."""
 
     def __init__(self, save_path: str = None, config_file: str = "config.yaml"):
         super().__init__(save_path, config_file)
@@ -28,13 +39,15 @@ class MobileNetV2Exporter(BaseONNXExporter):
     def load_config(self) -> Dict[str, Any]:
         config = {
             "batch_size": 1,
-            "img_size": 224,
-            "input_channels": 3,
-            "num_classes": 1000,
-            "width_mult": 1.0,  # 0.35 for MLperf Tiny VWW
+            "n_time": 25,  # Time frames (25 for PULP-small, 49 for full MLperf)
+            "n_freq": 10,  # Mel-filterbank bins
+            "num_classes": 12,  # 10 commands + silence + unknown
+            "variant": "xs",  # "xs" (16ch, PULP) | "s" (64ch, full MLperf)
+            "base_channels": 16,  # Overrides variant if set explicitly
+            "n_ds_blocks": 4,
             "opset_version": 17,
             # Training
-            "training_strategy": "full",  # "full" | "last_layer" | "no_features" | "custom"
+            "training_strategy": "full",  # "full" | "last_layer" | "no_stem" | "custom"
             "custom_trainable_params": [],
             "learning_rate": 0.001,
             "n_batches": 4,
@@ -45,6 +58,11 @@ class MobileNetV2Exporter(BaseONNXExporter):
         if hasattr(self, "_config_overrides") and self._config_overrides:
             config.update(self._config_overrides)
 
+        # Resolve base_channels from variant if not explicitly overridden
+        overrides = getattr(self, "_config_overrides", {}) or {}
+        if "base_channels" not in overrides:
+            config["base_channels"] = 64 if config.get("variant") == "s" else 16
+
         self.model_config = config
         return config
 
@@ -53,10 +71,14 @@ class MobileNetV2Exporter(BaseONNXExporter):
     # ------------------------------------------------------------------ #
 
     def create_model(self) -> torch.nn.Module:
-        return mobilenet_v2(
+        from .pytorch_models.dscnn.dscnn import DSCNN
+
+        return DSCNN(
             num_classes=self.model_config["num_classes"],
-            width_mult=self.model_config["width_mult"],
-            input_channels=self.model_config["input_channels"],
+            n_time=self.model_config["n_time"],
+            n_freq=self.model_config["n_freq"],
+            base_channels=self.model_config["base_channels"],
+            n_ds_blocks=self.model_config["n_ds_blocks"],
         )
 
     # ------------------------------------------------------------------ #
@@ -66,14 +88,14 @@ class MobileNetV2Exporter(BaseONNXExporter):
     def get_input_shape(self) -> Tuple[int, ...]:
         return (
             self.config["batch_size"],
-            self.config["input_channels"],
-            self.config["img_size"],
-            self.config["img_size"],
+            1,  # single-channel MFCC
+            self.config["n_time"],
+            self.config["n_freq"],
         )
 
     def _get_config_string(self) -> str:
-        width = self.config["width_mult"]
-        return f"_mobilenetv2_{width}_{self.config['img_size']}_{self.config['num_classes']}"
+        v = self.config.get("variant", "xs")
+        return f"_dscnn_{v}_{self.config['n_time']}x{self.config['n_freq']}_{self.config['num_classes']}"
 
     # ------------------------------------------------------------------ #
     # Training strategy                                                   #
@@ -84,17 +106,17 @@ class MobileNetV2Exporter(BaseONNXExporter):
         Pattern-based trainable parameter selection.
 
         Strategies:
-        - "full":         Train all parameters (default).
-        - "last_layer":   Only the final classifier FC.
-        - "no_features":  Freeze features backbone; train classifier only.
-        - "custom":       Explicit list from config["custom_trainable_params"].
+        - "full":       Train all parameters (default).
+        - "last_layer": Only the FC classifier.
+        - "no_stem":    Freeze conv_stem; train DS blocks + FC.
+        - "custom":     Explicit list from config["custom_trainable_params"].
         """
         strategy = self.config.get("training_strategy", "full")
 
         _FREEZE = {
             "full": lambda n: False,
-            "last_layer": lambda n: "classifier" not in n,
-            "no_features": lambda n: "features" in n,
+            "last_layer": lambda n: "fc" not in n,
+            "no_stem": lambda n: "conv_stem" in n or "bn_stem" in n,
             "custom": lambda n: n not in self.config.get("custom_trainable_params", []),
         }
 
@@ -145,8 +167,8 @@ class MobileNetV2Exporter(BaseONNXExporter):
         """
         Save inputs.npz / outputs.npz for training-mode validation.
 
-        Follows the SimpleCnnExporter layout (see simple_cnn_exporter.py for details).
-        Grad-accumulation buffers are excluded; the C harness zero-inits them.
+        Follows the standard Deeploy training data layout (SimpleCnnExporter pattern).
+        Inputs are random MFCC-shaped float tensors; labels are random int64 class indices.
         """
         import onnx
         import onnxruntime as ort
@@ -167,7 +189,7 @@ class MobileNetV2Exporter(BaseONNXExporter):
         save_dir.mkdir(parents=True, exist_ok=True)
 
         input_shape = self.get_input_shape()
-        num_classes = self.config.get("num_classes", 10)
+        num_classes = self.config.get("num_classes", 12)
         learning_rate = float(self.config.get("learning_rate", 0.001))
 
         print(

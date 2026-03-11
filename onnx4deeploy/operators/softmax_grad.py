@@ -87,12 +87,9 @@ class SoftmaxGradOperatorTest(BaseOperatorTest):
         return model
 
     def run_inference(self, onnx_file: str, inputs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
-        """
-        Skip ONNX Runtime inference for custom operators.
-
-        Compute output directly using NumPy.
-        """
-        return self.compute_expected_output(inputs)
+        """Skip ONNX Runtime inference — custom operator, no reference output."""
+        result = self.compute_expected_output(inputs)
+        return result if result is not None else {}
 
     def compute_expected_output(self, inputs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
         """

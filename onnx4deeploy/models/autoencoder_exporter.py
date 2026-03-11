@@ -2,7 +2,27 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""MobileNetV2 Model Exporter — inference + training graph support."""
+"""FC Autoencoder Exporter — MLperf Tiny Anomaly Detection (AD) benchmark.
+
+Supports inference and full training-graph generation.
+
+Loss: MSELoss (reconstruction: output ≈ input).
+  ORT generate_artifacts() receives the "labels" tensor which equals the input
+  features — the model is trained to reconstruct its own input.
+
+Anomaly detection at runtime:
+  reconstruction_error = MSE(model(x), x)
+  anomaly = reconstruction_error > threshold
+
+Default configuration (PULP-deployable "tiny" variant):
+  Input:  (1, 128)  — 128-dim log-mel spectrogram feature vector
+  Hidden: [64, 32, 64]  — symmetric encoder-decoder
+  ~26 K parameters, fits in PULP L2
+
+Full MLperf Tiny AD reference variant ("mlperf"):
+  Hidden: [128, 128, 128]
+  ~100 K parameters — may require training_strategy="last_layer" on PULP
+"""
 
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
@@ -11,15 +31,24 @@ import numpy as np
 import torch
 
 from ..core.base_exporter import BaseONNXExporter
-from .pytorch_models.mobilenet import mobilenet_v2
 
 
-class MobileNetV2Exporter(BaseONNXExporter):
-    """ONNX exporter for MobileNetV2 model (MLPerf Mobile / VWW benchmark)."""
+class AutoencoderExporter(BaseONNXExporter):
+    """ONNX exporter for FC Autoencoder (MLperf Tiny Anomaly Detection)."""
 
     def __init__(self, save_path: str = None, config_file: str = "config.yaml"):
         super().__init__(save_path, config_file)
         self.model_config = {}
+
+    # ------------------------------------------------------------------ #
+    # Loss type override — MSE for reconstruction                          #
+    # ------------------------------------------------------------------ #
+
+    def get_loss_type(self):
+        """Override to use MSELoss for autoencoder reconstruction training."""
+        from onnxruntime.training import artifacts
+
+        return artifacts.LossType.MSELoss
 
     # ------------------------------------------------------------------ #
     # Configuration                                                        #
@@ -28,13 +57,12 @@ class MobileNetV2Exporter(BaseONNXExporter):
     def load_config(self) -> Dict[str, Any]:
         config = {
             "batch_size": 1,
-            "img_size": 224,
-            "input_channels": 3,
-            "num_classes": 1000,
-            "width_mult": 1.0,  # 0.35 for MLperf Tiny VWW
+            "input_dim": 128,  # Feature vector length (128 for MLperf Tiny AD)
+            "hidden_dims": [64, 32, 64],  # [128, 128, 128] for full MLperf Tiny reference
+            "variant": "tiny",  # "tiny" (PULP) | "mlperf" (reference)
             "opset_version": 17,
             # Training
-            "training_strategy": "full",  # "full" | "last_layer" | "no_features" | "custom"
+            "training_strategy": "full",  # "full" | "encoder_only" | "decoder_only" | "custom"
             "custom_trainable_params": [],
             "learning_rate": 0.001,
             "n_batches": 4,
@@ -45,6 +73,14 @@ class MobileNetV2Exporter(BaseONNXExporter):
         if hasattr(self, "_config_overrides") and self._config_overrides:
             config.update(self._config_overrides)
 
+        # Resolve hidden_dims from variant if not explicitly set
+        overrides = getattr(self, "_config_overrides", {}) or {}
+        if "hidden_dims" not in overrides:
+            if config.get("variant") == "mlperf":
+                config["hidden_dims"] = [128, 128, 128]
+            else:
+                config["hidden_dims"] = [64, 32, 64]
+
         self.model_config = config
         return config
 
@@ -53,10 +89,11 @@ class MobileNetV2Exporter(BaseONNXExporter):
     # ------------------------------------------------------------------ #
 
     def create_model(self) -> torch.nn.Module:
-        return mobilenet_v2(
-            num_classes=self.model_config["num_classes"],
-            width_mult=self.model_config["width_mult"],
-            input_channels=self.model_config["input_channels"],
+        from .pytorch_models.autoencoder.autoencoder import FCAutoencoder
+
+        return FCAutoencoder(
+            input_dim=self.model_config["input_dim"],
+            hidden_dims=self.model_config["hidden_dims"],
         )
 
     # ------------------------------------------------------------------ #
@@ -64,16 +101,12 @@ class MobileNetV2Exporter(BaseONNXExporter):
     # ------------------------------------------------------------------ #
 
     def get_input_shape(self) -> Tuple[int, ...]:
-        return (
-            self.config["batch_size"],
-            self.config["input_channels"],
-            self.config["img_size"],
-            self.config["img_size"],
-        )
+        return (self.config["batch_size"], self.config["input_dim"])
 
     def _get_config_string(self) -> str:
-        width = self.config["width_mult"]
-        return f"_mobilenetv2_{width}_{self.config['img_size']}_{self.config['num_classes']}"
+        v = self.config.get("variant", "tiny")
+        dims = "x".join(str(d) for d in self.config["hidden_dims"])
+        return f"_ae_{v}_{self.config['input_dim']}_{dims}"
 
     # ------------------------------------------------------------------ #
     # Training strategy                                                   #
@@ -85,16 +118,16 @@ class MobileNetV2Exporter(BaseONNXExporter):
 
         Strategies:
         - "full":         Train all parameters (default).
-        - "last_layer":   Only the final classifier FC.
-        - "no_features":  Freeze features backbone; train classifier only.
+        - "encoder_only": Freeze decoder; train only encoder layers.
+        - "decoder_only": Freeze encoder; train only decoder layers.
         - "custom":       Explicit list from config["custom_trainable_params"].
         """
         strategy = self.config.get("training_strategy", "full")
 
         _FREEZE = {
             "full": lambda n: False,
-            "last_layer": lambda n: "classifier" not in n,
-            "no_features": lambda n: "features" in n,
+            "encoder_only": lambda n: "decoder" in n,
+            "decoder_only": lambda n: "encoder" in n,
             "custom": lambda n: n not in self.config.get("custom_trainable_params", []),
         }
 
@@ -143,10 +176,12 @@ class MobileNetV2Exporter(BaseONNXExporter):
         self, n_batches: int = None, num_data_inputs: int = 2, n_accum: int = None
     ) -> None:
         """
-        Save inputs.npz / outputs.npz for training-mode validation.
+        Save inputs.npz / outputs.npz for autoencoder training validation.
 
-        Follows the SimpleCnnExporter layout (see simple_cnn_exporter.py for details).
-        Grad-accumulation buffers are excluded; the C harness zero-inits them.
+        Key difference from classification exporters:
+        - No int64 label input. ORT MSELoss expects a float "labels" tensor == input features.
+        - The "label" fed to ORT is the input itself (reconstruction target).
+        - outputs.npz contains updated weights + per-mini-batch MSE loss values.
         """
         import onnx
         import onnxruntime as ort
@@ -167,7 +202,6 @@ class MobileNetV2Exporter(BaseONNXExporter):
         save_dir.mkdir(parents=True, exist_ok=True)
 
         input_shape = self.get_input_shape()
-        num_classes = self.config.get("num_classes", 10)
         learning_rate = float(self.config.get("learning_rate", 0.001))
 
         print(
@@ -181,14 +215,12 @@ class MobileNetV2Exporter(BaseONNXExporter):
             else n_batches
         )
 
+        # Autoencoder: labels = inputs (reconstruction target)
         rng = np.random.default_rng(42)
         test_inputs = [
             rng.standard_normal(input_shape).astype(np.float32) for _ in range(effective_data_size)
         ]
-        labels_list = [
-            rng.integers(0, num_classes, size=(input_shape[0],)).astype(np.int64)
-            for _ in range(effective_data_size)
-        ]
+        # No separate label list — labels are the inputs themselves
 
         infer_model = onnx.load(self.paths["network_infer"])
         init_map: dict = {
@@ -227,21 +259,21 @@ class MobileNetV2Exporter(BaseONNXExporter):
 
             for accum_step in range(n_accum):
                 mb = update_step * n_accum + accum_step
+                data = test_inputs[mb % effective_data_size]
 
                 feed = {}
                 for inp in session.get_inputs():
                     name = inp.name
                     shape = [d for d in inp.shape if isinstance(d, int) and d > 0]
-                    if inp.type == "tensor(int64)":
-                        feed[name] = labels_list[mb % effective_data_size]
-                    elif inp.type == "tensor(bool)":
+                    if inp.type == "tensor(bool)":
                         feed[name] = np.array([accum_step == 0])
                     elif name in current_weights:
                         feed[name] = current_weights[name]
                     elif _GRAD_ACC in name:
                         feed[name] = np.zeros(shape, dtype=np.float32)
                     elif shape == list(input_shape):
-                        feed[name] = test_inputs[mb % effective_data_size]
+                        # Could be either the data input or the MSE "labels" input
+                        feed[name] = data
                     else:
                         feed[name] = np.zeros(shape, dtype=np.float32)
 
@@ -279,15 +311,14 @@ class MobileNetV2Exporter(BaseONNXExporter):
             else:
                 print(f"   non-grad input '{name}' not found in feed — skipping")
 
+        # For autoencoder: both data slots (input + labels) use the same feature vector
         session_type: dict = {inp.name: inp.type for inp in session.get_inputs()}
         data_names = non_grad_names[:num_data_inputs]
         for mb in range(1, effective_data_size):
+            data = test_inputs[mb]
             for buf_idx, data_name in enumerate(data_names):
-                inp_type = session_type.get(data_name, "tensor(float)")
-                if inp_type == "tensor(int64)":
-                    save_dict[f"mb{mb}_arr_{buf_idx:04d}"] = labels_list[mb]
-                else:
-                    save_dict[f"mb{mb}_arr_{buf_idx:04d}"] = test_inputs[mb]
+                # Both input and labels slots get the same feature vector
+                save_dict[f"mb{mb}_arr_{buf_idx:04d}"] = data
 
         save_dict["meta_data_size"] = np.array([effective_data_size], dtype=np.int32)
         save_dict["meta_n_batches"] = np.array([n_batches], dtype=np.int32)

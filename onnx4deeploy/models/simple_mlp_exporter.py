@@ -261,9 +261,6 @@ class SimpleMlpExporter(BaseONNXExporter):
         """
         import onnx
         import onnxruntime as ort
-        from onnx import numpy_helper
-
-        _GRAD_ACC = "_grad.accumulation.buffer"
 
         # Resolve n_batches / n_accum from explicit args > config > defaults.
         if n_batches is None:
@@ -283,12 +280,12 @@ class SimpleMlpExporter(BaseONNXExporter):
         save_dir.mkdir(parents=True, exist_ok=True)
 
         input_shape = self.get_input_shape()
-        input_shape[0]
         num_classes = self.config.get("num_classes", 2)
         learning_rate = float(self.config.get("learning_rate", 0.001))
 
         print(
-            f"   Training sim: n_batches={n_batches}  n_accum={n_accum}  n_steps={n_steps}  lr={learning_rate}"
+            f"   Training sim: n_batches={n_batches}  n_accum={n_accum}"
+            f"  n_steps={n_steps}  lr={learning_rate}"
         )
 
         # Determine effective_data_size: only unique samples stored in NPZ/C header.
@@ -307,10 +304,7 @@ class SimpleMlpExporter(BaseONNXExporter):
         )
 
         # Read initial parameter values from the inference model.
-        infer_model = onnx.load(self.paths["network_infer"])
-        init_map: dict = {
-            init.name: numpy_helper.to_array(init) for init in infer_model.graph.initializer
-        }
+        init_map: dict = self._load_init_map(self.paths["network_infer"])
 
         # Load network_train.onnx and expose per-step gradient tensors as extra outputs
         # so we can manually accumulate them across n_accum mini-batches.
@@ -350,24 +344,13 @@ class SimpleMlpExporter(BaseONNXExporter):
 
             for accum_step in range(n_accum):
                 mb = update_step * n_accum + accum_step
-
-                feed = {}
-                for inp in session.get_inputs():
-                    name = inp.name
-                    shape = [d for d in inp.shape if isinstance(d, int) and d > 0]
-                    if inp.type == "tensor(int64)":
-                        feed[name] = labels_list[mb % effective_data_size]
-                    elif inp.type == "tensor(bool)":
-                        # lazy_reset_grad: True on first accum step, False otherwise.
-                        feed[name] = np.array([accum_step == 0])
-                    elif name in current_weights:
-                        feed[name] = current_weights[name]
-                    elif _GRAD_ACC in name:
-                        feed[name] = np.zeros(shape, dtype=np.float32)
-                    elif shape == list(input_shape):
-                        feed[name] = test_inputs[mb % effective_data_size]
-                    else:
-                        feed[name] = np.zeros(shape, dtype=np.float32)
+                feed = self._build_input_feed(
+                    session,
+                    param_values=current_weights,
+                    test_input=test_inputs[mb % effective_data_size],
+                    labels=labels_list[mb % effective_data_size],
+                    lazy_reset_grad=(accum_step == 0),
+                )
 
                 if mb == 0:
                     feed_mb0 = dict(feed)  # snapshot mb=0 feed (initial weights)
@@ -403,7 +386,7 @@ class SimpleMlpExporter(BaseONNXExporter):
         final_input_names = [inp.name for inp in final_model.graph.input]
 
         # Separate grad-acc-buf names from the rest.
-        grad_acc_names = {n for n in final_input_names if _GRAD_ACC in n}
+        grad_acc_names = {n for n in final_input_names if self._GRAD_ACC_SUFFIX in n}
         non_grad_names = [n for n in final_input_names if n not in grad_acc_names]
 
         # Base entries (sequential arr_0000 … arr_{M-1} over non-grad inputs).
