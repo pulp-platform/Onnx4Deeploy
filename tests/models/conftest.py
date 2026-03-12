@@ -90,3 +90,69 @@ def simplemlp_config():
         "num_classes": 10,
         "opset_version": 17,
     }
+
+
+@pytest.fixture
+def resnet_config():
+    """Minimal ResNet-8 configuration for fast tests (MLperf Tiny IC)."""
+    return {
+        "batch_size": 1,
+        "variant": "resnet8",
+        "img_size": 32,
+        "input_channels": 3,
+        "num_classes": 10,
+        "base_channels": 16,
+        "opset_version": 17,
+    }
+
+
+@pytest.fixture
+def mobilenetv2_config():
+    """Minimal MobileNetV2-0.35 configuration for fast tests (MLperf Tiny VWW)."""
+    return {
+        "batch_size": 1,
+        "img_size": 32,  # Reduced from 96 for speed
+        "input_channels": 3,
+        "num_classes": 2,
+        "width_mult": 0.35,
+        "opset_version": 17,
+    }
+
+
+@pytest.fixture
+def dscnn_config():
+    """Default DS-CNN-XS configuration for fast tests (MLperf Tiny KWS)."""
+    return {
+        "batch_size": 1,
+        "n_time": 25,
+        "n_freq": 10,
+        "num_classes": 12,
+        "base_channels": 16,
+        "n_ds_blocks": 2,  # Reduced from 4 for speed
+        "opset_version": 17,
+    }
+
+
+@pytest.fixture
+def lightweight_cnn_config():
+    """Default Lightweight CNN configuration for fast tests."""
+    return {
+        "batch_size": 1,
+        "input_height": 28,
+        "input_width": 28,
+        "input_channels": 1,
+        "num_classes": 10,
+        "opset_version": 17,
+    }
+
+
+@pytest.fixture
+def autoencoder_config():
+    """Minimal Autoencoder configuration for fast tests (MLperf Tiny AD)."""
+    return {
+        "batch_size": 1,
+        "input_dim": 32,  # Reduced from 128 for speed
+        "hidden_dims": [16, 8, 16],  # Reduced for speed
+        "variant": "tiny",
+        "opset_version": 17,
+    }

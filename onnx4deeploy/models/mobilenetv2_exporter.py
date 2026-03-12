@@ -150,9 +150,6 @@ class MobileNetV2Exporter(BaseONNXExporter):
         """
         import onnx
         import onnxruntime as ort
-        from onnx import numpy_helper
-
-        _GRAD_ACC = "_grad.accumulation.buffer"
 
         if n_batches is None:
             n_batches = self.config.get("n_batches", 4)
@@ -190,10 +187,7 @@ class MobileNetV2Exporter(BaseONNXExporter):
             for _ in range(effective_data_size)
         ]
 
-        infer_model = onnx.load(self.paths["network_infer"])
-        init_map: dict = {
-            init.name: numpy_helper.to_array(init) for init in infer_model.graph.initializer
-        }
+        init_map: dict = self._load_init_map(self.paths["network_infer"])
 
         train_model_onnx = onnx.load(self.paths["network_train"])
         grad_tensor_map: dict = {}
@@ -228,22 +222,13 @@ class MobileNetV2Exporter(BaseONNXExporter):
             for accum_step in range(n_accum):
                 mb = update_step * n_accum + accum_step
 
-                feed = {}
-                for inp in session.get_inputs():
-                    name = inp.name
-                    shape = [d for d in inp.shape if isinstance(d, int) and d > 0]
-                    if inp.type == "tensor(int64)":
-                        feed[name] = labels_list[mb % effective_data_size]
-                    elif inp.type == "tensor(bool)":
-                        feed[name] = np.array([accum_step == 0])
-                    elif name in current_weights:
-                        feed[name] = current_weights[name]
-                    elif _GRAD_ACC in name:
-                        feed[name] = np.zeros(shape, dtype=np.float32)
-                    elif shape == list(input_shape):
-                        feed[name] = test_inputs[mb % effective_data_size]
-                    else:
-                        feed[name] = np.zeros(shape, dtype=np.float32)
+                feed = self._build_input_feed(
+                    session,
+                    param_values=current_weights,
+                    test_input=test_inputs[mb % effective_data_size],
+                    labels=labels_list[mb % effective_data_size],
+                    lazy_reset_grad=(accum_step == 0),
+                )
 
                 if mb == 0:
                     feed_mb0 = dict(feed)
@@ -269,7 +254,7 @@ class MobileNetV2Exporter(BaseONNXExporter):
 
         final_model = onnx.load(self.paths["network"])
         final_input_names = [inp.name for inp in final_model.graph.input]
-        grad_acc_names = {n for n in final_input_names if _GRAD_ACC in n}
+        grad_acc_names = {n for n in final_input_names if self._GRAD_ACC_SUFFIX in n}
         non_grad_names = [n for n in final_input_names if n not in grad_acc_names]
 
         save_dict: dict = {}

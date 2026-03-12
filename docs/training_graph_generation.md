@@ -8,17 +8,18 @@ Onnx4Deeploy, from CLI flags to Python-level configuration and extension points.
 ## Table of Contents
 
 1. [Overview](#overview)
-2. [Pipeline Stages](#pipeline-stages)
-3. [Generated Files](#generated-files)
-4. [CLI Reference](#cli-reference)
-5. [Configuration Keys](#configuration-keys)
-6. [Training Strategy](#training-strategy)
-7. [Gradient Accumulation](#gradient-accumulation)
-8. [Data Source](#data-source)
-9. [Test Data Layout (inputs.npz / outputs.npz)](#test-data-layout)
-10. [Extending: Custom Exporters](#extending-custom-exporters)
-11. [Extending: Custom Data Sources](#extending-custom-data-sources)
-12. [Complete Examples](#complete-examples)
+2. [Supported Models](#supported-models)
+3. [Pipeline Stages](#pipeline-stages)
+4. [Generated Files](#generated-files)
+5. [CLI Reference](#cli-reference)
+6. [Configuration Keys](#configuration-keys)
+7. [Training Strategy](#training-strategy)
+8. [Gradient Accumulation](#gradient-accumulation)
+9. [Data Source](#data-source)
+10. [Test Data Layout (inputs.npz / outputs.npz)](#test-data-layout)
+11. [Extending: Custom Exporters](#extending-custom-exporters)
+12. [Extending: Custom Data Sources](#extending-custom-data-sources)
+13. [Complete Examples](#complete-examples)
 
 ---
 
@@ -42,6 +43,37 @@ network.onnx                ← Deeploy-ready training graph (final)
     ▼  ORT InferenceSession simulation
 inputs.npz / outputs.npz   ← reference test data for on-device verification
 ```
+
+---
+
+## Supported Models
+
+All models below support both `--mode infer` and `--mode train`.
+
+### General Purpose
+
+| Model | Exporter class | CLI name | Default input | Notes |
+|-------|----------------|----------|---------------|-------|
+| Simple MLP | `SimpleMlpExporter` | `SimpleMLP` | `(1, 64)` | Reference model; MNIST training supported |
+| Lightweight CNN | `LightweightCnnExporter` | `LightweightCNN` | `(1, 1, 28, 28)` | MNIST/random data |
+| MI-BMInet | `MIBMInetExporter` | `MIBMInet` | `(1, 1, 8, 2000)` | EEG motor imagery; LayerNorm-based |
+| SleepConViT | `SleepConViTExporter` | `SleepConViT` | `(1, 1, 1, 3000)` | 1-D conv transformer; tiling supported |
+| CCT | `CCTExporter` | `CCT` | `(1, 3, 32, 32)` | Compact vision transformer |
+| EpiDeNet | `EpiDeNetExporter` | `EpiDeNet` | `(1, 1, 8, 2000)` | Epilepsy detection |
+
+### MLperf Tiny Benchmarks
+
+| Model | Exporter class | CLI name | Benchmark | Default input | Loss |
+|-------|----------------|----------|-----------|---------------|------|
+| ResNet-8 | `ResNetExporter` | `ResNet` | Image Classification (IC) | `(1, 3, 32, 32)` | CrossEntropyLoss |
+| MobileNetV2-0.35 | `MobileNetV2Exporter` | `MobileNetV2` | Visual Wake Words (VWW) | `(1, 3, 96, 96)` | CrossEntropyLoss |
+| DS-CNN-XS | `DSCNNExporter` | `DSCNN` | Keyword Spotting (KWS) | `(1, 1, 25, 10)` | CrossEntropyLoss |
+| FC Autoencoder | `AutoencoderExporter` | `Autoencoder` | Anomaly Detection (AD) | `(1, 128)` | **MSELoss** |
+
+> **Note — Autoencoder (MSELoss):** The Autoencoder uses `MSELoss` (reconstruction).
+> There are no integer class labels.  ORT receives the input feature vector as both the
+> data input *and* the reconstruction target.  Override `get_loss_type()` to replicate
+> this pattern in custom exporters (see [Extending: Custom Exporters](#extending-custom-exporters)).
 
 ---
 
@@ -440,6 +472,7 @@ class MyModelExporter(BaseONNXExporter):
 | Method | Default behaviour | When to override |
 |--------|-------------------|------------------|
 | `get_trainable_params(all_names)` | Returns all param names | Custom frozen/trainable split |
+| `get_loss_type()` | `CrossEntropyLoss` | Use `MSELoss` (e.g. Autoencoder) |
 | `get_data_source()` | Returns `RandomDataSource` | Use real dataset |
 | `get_inference_pipeline()` | Standard inference passes | Model needs extra ONNX transforms |
 | `get_training_pipeline()` | Standard training passes | Model needs custom Deeploy transforms |
@@ -451,6 +484,79 @@ graph structure matches the standard ORT pattern (gradient outputs named
 `<param>_grad`).  For models with custom loss or gradient structures (like
 SimpleMLP with `InPlaceAccumulatorV2`), override the method and call
 `get_data_source()` to keep data loading decoupled.
+
+#### Overriding loss type
+
+```python
+def get_loss_type(self):
+    from onnxruntime.training import artifacts
+    return artifacts.LossType.MSELoss  # or CrossEntropyLoss (default)
+```
+
+#### BatchNorm buffer exclusion
+
+Models with BatchNorm layers expose running statistics (`running_mean`,
+`running_var`, `num_batches_tracked`) as ONNX initializers.  These are **not**
+trainable parameters and must not appear in either `requires_grad` or
+`frozen_params` — ORT's `generate_artifacts` will raise an error if they do.
+
+`export_training()` in `BaseONNXExporter` automatically excludes these names
+via the class constant `_BN_BUFFERS`:
+
+```python
+_BN_BUFFERS = ("running_mean", "running_var", "num_batches_tracked")
+```
+
+When implementing `get_trainable_params()`, do **not** include parameters whose
+names contain any of these suffixes.  The base class handles the exclusion
+automatically before calling `get_trainable_params()`.
+
+### Training test-data helper API
+
+Two protected helpers on `BaseONNXExporter` are available to exporters that
+override `create_training_test_data()`:
+
+#### `_load_init_map(onnx_path) → dict`
+
+Loads all initializers from an ONNX model file into a `{name: np.ndarray}` dict.
+
+```python
+init_map = self._load_init_map(self.paths["network_infer"])
+# init_map["fc1.weight"]  → numpy array, shape (H, I)
+```
+
+Prefer `network_infer.onnx` as the source because its initializer values
+exactly match the checkpoint produced by `generate_artifacts`.  Fall back to
+`network_train.onnx` if the inference model is not available.
+
+#### `_build_input_feed(session, param_values, test_input, labels, lazy_reset_grad) → dict`
+
+Builds a complete ORT input `feed` dict for one forward+backward pass.
+Assignment rules (applied in priority order):
+
+| Priority | Condition | Assigned value |
+|----------|-----------|----------------|
+| 1 | `inp.type == "tensor(int64)"` | `labels` |
+| 2 | `inp.type == "tensor(bool)"` | `np.array([lazy_reset_grad])` |
+| 3 | `inp.name in param_values` | current parameter tensor |
+| 4 | `"_grad.accumulation.buffer" in inp.name` | zeros (float32) |
+| 5 | `shape == list(get_input_shape())` | `test_input` |
+| 6 | *(else)* | zeros (float32) |
+
+```python
+feed = self._build_input_feed(
+    session,
+    param_values=current_weights,
+    test_input=test_inputs[mb % effective_data_size],
+    labels=labels_list[mb % effective_data_size],
+    lazy_reset_grad=(accum_step == 0),
+)
+```
+
+For **Autoencoder (MSELoss)** models — where there is no int64 label input and
+both the data input and reconstruction-target input share the same shape — pass
+`labels=data` and `test_input=data`.  Rule 1 never fires (no int64 inputs),
+and rule 5 assigns `data` to both float inputs correctly.
 
 ---
 
@@ -573,6 +679,61 @@ python Onnx4Deeploy.py --model SimpleMLP --mode train \
 python Onnx4Deeploy.py --model SimpleMLP --mode train \
     --n-batches 4 -o /tmp/my_mlp_train
 ```
+
+### MLperf Tiny — Image Classification (ResNet-8 / CIFAR-10)
+
+```bash
+# Smoke test (random data)
+python Onnx4Deeploy.py --model ResNet --mode train \
+    --variant resnet8 --img-size 32 --num-classes 10 --n-batches 4
+
+# Full training strategy (last layer only — faster convergence)
+python Onnx4Deeploy.py --model ResNet --mode train \
+    --variant resnet8 --img-size 32 --num-classes 10 \
+    --training-strategy last_layer --n-batches 16
+```
+
+### MLperf Tiny — Visual Wake Words (MobileNetV2-0.35)
+
+```bash
+# Reduced image size for fast testing
+python Onnx4Deeploy.py --model MobileNetV2 --mode train \
+    --width-mult 0.35 --img-size 32 --num-classes 2 --n-batches 4
+
+# Full MLperf Tiny VWW (96×96 input — large model, may require last_layer strategy on PULP)
+python Onnx4Deeploy.py --model MobileNetV2 --mode train \
+    --width-mult 0.35 --img-size 96 --num-classes 2 \
+    --training-strategy last_layer --n-batches 8
+```
+
+### MLperf Tiny — Keyword Spotting (DS-CNN-XS)
+
+```bash
+# Default DS-CNN-XS configuration (25×10 MFCC, 12 classes)
+python Onnx4Deeploy.py --model DSCNN --mode train \
+    --n-time 25 --n-freq 10 --num-classes 12 --n-batches 4
+
+# With gradient accumulation
+python Onnx4Deeploy.py --model DSCNN --mode train \
+    --n-time 25 --n-freq 10 --num-classes 12 \
+    --n-batches 8 --n-accum 4
+```
+
+### MLperf Tiny — Anomaly Detection (FC Autoencoder / MSELoss)
+
+```bash
+# Default tiny variant (128-dim input → 64→32→64 → 128-dim reconstruction)
+python Onnx4Deeploy.py --model Autoencoder --mode train \
+    --input-dim 128 --n-batches 4
+
+# MLperf Tiny reference variant (larger hidden layers)
+python Onnx4Deeploy.py --model Autoencoder --mode train \
+    --variant mlperf --input-dim 128 --n-batches 8
+```
+
+> **Autoencoder note:** `outputs.npz["loss"]` contains MSE reconstruction
+> losses.  Lower values indicate better reconstruction — the opposite
+> interpretation from classification cross-entropy loss.
 
 ### Python API
 
