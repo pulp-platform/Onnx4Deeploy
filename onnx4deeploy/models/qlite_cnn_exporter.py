@@ -11,7 +11,7 @@ import numpy as np
 import torch
 import torch.onnx.utils
 
-from DeepQuant.DeepQuant.ExportBrevitas import exportBrevitas
+from DeepQuant.ExportBrevitas import exportBrevitas
 
 from ..core.base_exporter import BaseONNXExporter
 

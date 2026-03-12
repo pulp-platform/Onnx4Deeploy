@@ -25,8 +25,176 @@ def generate_zo_graph(inference_onnx:str, output_onnx:str, zo_config:dict) -> No
                               exceptions=exceptions)
 
     ensure_all_tensor_shapes(model_path=output_onnx, output_path=output_onnx)
-    # append_cross_entropy_loss(output_onnx, output_onnx, label_name='label')
+    append_cross_entropy_loss(output_onnx, output_onnx, label_name='label')
 
+def generate_weight_update_graph(onnx_path: str, output_path: str, zo_config: dict) -> None:
+    """
+    Generates a weight update ONNX graph: for each weight/bias, creates a perturbation node
+    that updates the initializer in-place. No inputs, no outputs, just perturbation nodes.
+    """
+    epsilon, seed, noise_type, exceptions = zo_config["epsilon"], zo_config["seed"], zo_config["noise_type"], zo_config.get("exceptions", [])
+
+    model = onnx.load(onnx_path)
+    initializers = [init for init in model.graph.initializer if ("weight" in init.name or "bias" in init.name) and init.name not in exceptions]
+    nodes = []
+    perturbation_counter = 0
+
+    for init in initializers:
+        perturbed_name = init.name  # Overwrite the initializer directly
+        if noise_type == "gaussian":
+            node = helper.make_node(
+                "PerturbNormal",
+                inputs=[init.name],
+                outputs=[perturbed_name],
+                name=f"perturbnormal_{perturbed_name}",
+                domain="mezo",
+                seed=seed,
+                eps=epsilon,
+                idx=perturbation_counter,
+                doc_string="y = x + epsilon * RandomNormal(x, seed)"
+            )
+        elif noise_type == "uniform":
+            node = helper.make_node(
+                "PerturbUniform",
+                inputs=[init.name],
+                outputs=[perturbed_name],
+                name=f"perturbuniform_{perturbed_name}",
+                domain="mezo",
+                idx=perturbation_counter,
+                seed=seed,
+                eps=epsilon,
+                low=-np.sqrt(3),
+                high=np.sqrt(3),
+                doc_string="y = x + epsilon * RandomUniform(x, seed)"
+            )
+        elif noise_type == "eggroll":
+            # Shape annotation for intermediate outputs
+              # Prepare shapes for eggroll perturbation
+            noise_shape = [int(x) for x in init.dims]
+            a_shape = [noise_shape[0], 1]
+            b_shape = [int(np.prod(noise_shape[1:])), 1]
+
+            # Create shape initializers
+            shape_a_tensor = helper.make_tensor(
+                name=f"shape_a_{init.name}", data_type=TensorProto.INT64, dims=[len(a_shape)],
+                vals=np.array(a_shape, dtype=np.int64)
+            )
+            shape_b_tensor = helper.make_tensor(
+                name=f"shape_b_{init.name}", data_type=TensorProto.INT64, dims=[len(b_shape)],
+                vals=np.array(b_shape, dtype=np.int64)
+            )
+            shape_input_tensor = helper.make_tensor(
+                name=f"shape_{init.name}", data_type=TensorProto.INT64, dims=[len(noise_shape)],
+                vals=np.array(noise_shape, dtype=np.int64)
+            )
+
+            # Optionally flatten if needed
+            if len(noise_shape) > 2:
+                shape_flat_tensor = helper.make_tensor(
+                    name=f"shape_{init.name}_flat", data_type=TensorProto.INT64, dims=[2],
+                    vals=np.array([a_shape[0], b_shape[0]], dtype=np.int64)
+                )
+                # Flatten node
+                flatten_node = helper.make_node(
+                    "Reshape",
+                    inputs=[init.name, f"shape_{init.name}_flat"],
+                    outputs=[f"flattened_{init.name}"],
+                    name=f"flatten_{init.name}"
+                )
+                nodes.append(flatten_node)
+                eggroll_input = f"flattened_{init.name}"
+                eggroll_output = f"flattened_{init.name}_perturbed"
+                # Unflatten node
+                unflatten_node = helper.make_node(
+                    "Reshape",
+                    inputs=[eggroll_output, f"shape_{init.name}"],
+                    outputs=[init.name],
+                    name=f"unflatten_{init.name}_perturbed"
+                )
+                nodes.append(unflatten_node)
+                # Add flat shape initializer
+                initializers.extend([shape_flat_tensor])
+            else:
+                eggroll_input = init.name
+                eggroll_output = f"{init.name}_perturbed"
+
+            # Add shape initializers
+            initializers.extend([shape_a_tensor, shape_b_tensor, shape_input_tensor])
+
+            # Eggroll noise nodes
+            noise_node_a = helper.make_node(
+                "PerturbEggroll",
+                inputs=[f"shape_a_{init.name}"],
+                outputs=[f"a_{init.name}"],
+                name=f"gen_eggroll_noise_a_{init.name}",
+                seed=seed,
+                eps=epsilon,
+                idx=perturbation_counter,
+                domain="com.microsoft",
+                doc_string="a = RandomRademacher(x[0], seed)"
+            )
+            noise_node_b = helper.make_node(
+                "PerturbEggroll",
+                inputs=[f"shape_b_{init.name}"],
+                outputs=[f"b_{init.name}"],
+                name=f"gen_eggroll_noise_b_{init.name}",
+                seed=seed,
+                eps=epsilon,
+                idx=perturbation_counter,
+                domain="com.microsoft",
+                doc_string="b = RandomRademacher(x[1:], seed)"
+            )
+            gemm_node = helper.make_node(
+                "Gemm",
+                inputs=[f"a_{init.name}", f"b_{init.name}", eggroll_input],
+                outputs=[eggroll_output],
+                name=f"eggroll_gemm_{init.name}",
+                transA=0,
+                transB=1,
+                alpha=epsilon,
+                beta=0
+            )
+
+            nodes.extend([noise_node_a, noise_node_b, gemm_node])
+            
+        elif noise_type == "rademacher":
+            node = helper.make_node(
+                "PerturbRademacher",
+                inputs=[init.name],
+                outputs=[perturbed_name],
+                name=f"perturbrademacher_{perturbed_name}",
+                domain="mezo",
+                idx=perturbation_counter,
+                seed=seed,
+                eps=epsilon,
+                doc_string="y = x + epsilon * RandomRademacher(x, seed)"
+            )
+        # Add other noise types as needed...
+        else:
+            raise ValueError(f"Unsupported noise_type: {noise_type}")
+        nodes.append(node)
+        perturbation_counter += 1
+
+    # Build a minimal graph: no inputs, no outputs, just initializers and nodes
+    graph = helper.make_graph(
+        nodes=nodes,
+        name="weight_update_graph",
+        inputs=[],  # No inputs
+        outputs=[],  # No outputs
+        initializer=initializers
+    )
+
+    # Use the same opset as the original model, plus mezo domain
+    standard_opset_version = next((op.version for op in model.opset_import if op.domain == ""), 13)
+    opset_list = [
+        helper.make_opsetid("", standard_opset_version),
+        helper.make_opsetid("mezo", 1)
+    ]
+    new_model = helper.make_model(graph, producer_name="mezo-weight-update", opset_imports=opset_list)
+    onnx.save(new_model, output_path)
+    print(f"Saved weight update graph to: {output_path}")
+        
+    
 def inject_perturbation_nodes(
     onnx_path: str,
     output_path: str,

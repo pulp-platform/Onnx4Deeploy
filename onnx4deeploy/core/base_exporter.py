@@ -25,10 +25,10 @@ import torch
 from onnx import helper
 from onnxruntime.training import artifacts
 
-from DeepQuant.DeepQuant.Export4Deeploy import exportBrevitas
+from DeepQuant.Export4Deeploy import exportBrevitas
 
 from .onnx_utils import print_model_info, randomize_onnx_initializers
-from onnx4deeploy.transform.zo_transform import generate_zo_graph
+from onnx4deeploy.transform.zo_transform import generate_weight_update_graph, generate_zo_graph
 
 
 class ExportMode(Enum):
@@ -259,6 +259,7 @@ class BaseONNXExporter(ABC):
                 {
                     "network_infer": os.path.join(output_dir, "network_infer.onnx"),
                     "network_zo_train": os.path.join(output_dir, "network_zo_train.onnx"),
+                    "network_zo_update": os.path.join(output_dir, "network_zo_update.onnx"),
                 }
             )
 
@@ -339,14 +340,13 @@ class BaseONNXExporter(ABC):
 
         if not quant:
             # initialize weights and biases for testing
-            for param in model.parameters():
+            for name, param in model.named_parameters():
                 if param.requires_grad:
                     torch.nn.init.normal_(param, mean=0.0, std=0.02)
             # Export to ONNX
             print("\n📤 Exporting to ONNX...")
             opset_version = self.config.get("opset_version", 12)
             onnx_model = self._export_to_onnx(model, input_tensor, opset_version)
-        
         elif quant:
             # load weights.
             state_dict = torch.load(os.path.join(os.getcwd(), self.config.get("weights_path", "model_weights.pth")), map_location="cpu")
@@ -538,9 +538,22 @@ class BaseONNXExporter(ABC):
         print(f"   Input shape: {input_shape}")
 
         # Export to ONNX
-        print("\n📤 Exporting to ONNX...")
-        opset_version = self.config.get("opset_version", 12)
-        onnx_model = self._export_to_onnx(model, input_tensor, opset_version)
+        if not quant:
+            # initialize weights and biases for testing
+            for name, param in model.named_parameters():
+                if param.requires_grad:
+                    torch.nn.init.normal_(param, mean=0.0, std=0.02)
+            # Export to ONNX
+            print("\n📤 Exporting to ONNX...")
+            opset_version = self.config.get("opset_version", 12)
+            onnx_model = self._export_to_onnx(model, input_tensor, opset_version)
+        elif quant:
+            # load weights.
+            state_dict = torch.load(os.path.join(os.getcwd(), self.config.get("weights_path", "model_weights.pth")), map_location="cpu")
+            model.load_state_dict(state_dict, strict=False)
+            print("\n📤 Exporting to ONNX with quantization...")
+            # use DeepQuant to export to ONNX
+            onnx_model = exportBrevitas(model, input_tensor, debug=False)
 
         # Save
         onnx.save(onnx_model, self.paths["network_infer"])
@@ -582,8 +595,13 @@ class BaseONNXExporter(ABC):
         generate_zo_graph(
             inference_onnx=self.paths["network_infer"],
             output_onnx=self.paths["network_zo_train"],
-            zo_config=self.config["zo"],
+            zo_config=self.config["zo"]
         )
+        
+        generate_weight_update_graph(
+            onnx_path=self.paths["network_infer"],
+            output_path=self.paths["network_zo_update"],
+            zo_config=self.config["zo"])
 
         # # Load training model and add gradient outputs
         # onnx_model = onnx.load(self.paths["network_train"])
