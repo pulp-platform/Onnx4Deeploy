@@ -253,7 +253,7 @@ class DSCNNExporter(BaseONNXExporter):
                 )
 
                 if mb == 0:
-                    feed_mb0 = dict(feed)
+                    feed_mb0 = {k: v.copy() if hasattr(v, "copy") else v for k, v in feed.items()}
 
                 raw_outputs = session.run(None, feed)
                 outputs_raw = dict(zip(session_output_names, raw_outputs))
@@ -298,6 +298,7 @@ class DSCNNExporter(BaseONNXExporter):
 
         save_dict["meta_data_size"] = np.array([effective_data_size], dtype=np.int32)
         save_dict["meta_n_batches"] = np.array([n_batches], dtype=np.int32)
+        save_dict["meta_n_accum"] = np.array([n_accum], dtype=np.int32)
         np.savez(save_dir / "inputs.npz", **save_dict)
 
         n_params = sum(1 for n in non_grad_names if n in init_map)
