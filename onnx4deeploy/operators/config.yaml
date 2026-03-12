@@ -32,3 +32,101 @@ concat:
   num_inputs: 3
   axis: 1  # Concatenate along channel dimension
   base_shape: [1, 4, 8, 8]  # NCHW: each input has 4 channels, output will have 12 channels
+
+# SoftmaxCrossEntropyLoss dual-output variant (loss + log_prob)
+softmax_cross_entropy_dual_output:
+  input_shape: [1, 10]   # [batch, num_classes]
+  opset_version: 13
+
+# InPlaceAccumulatorV2 operator configuration (com.microsoft)
+# Gradient accumulation with lazy reset:
+#   if lazy_reset_grad: out = gradient           (reset)
+#   else:               out = buffer + gradient   (accumulate)
+inplace_accumulator_v2:
+  weight_shape: [128, 784]  # Typical MLP weight shape (hidden_size, input_size)
+  test_reset: true           # true = test reset mode, false = test accumulate mode
+
+# ── Gradient operator configurations ──────────────────────────────────────────
+
+relugrad:
+  input_shape: [1, 4, 8, 8]
+
+averagepoolgrad:
+  input_grad_shape: [1, 4, 4, 4]       # [N, C, Ho, Wo] — downstream gradient
+  original_input_shape: [1, 4, 8, 8]   # [N, C, Hi, Wi] — shape of original input
+  kernel_shape: [2, 2]
+  strides: [2, 2]
+  pads: [0, 0, 0, 0]
+  count_include_pad: 0
+  ceil_mode: 0
+
+# ConvGradXW (combined dX + dW, no bias — 2 outputs)
+convgradxw:
+  output_grad_shape: [1, 4, 2, 2]   # dY [N, Cout, Ho, Wo]  (no padding: (4-3)/1+1=2)
+  input_shape: [1, 2, 4, 4]         # X  [N, Cin,  Hi, Wi]
+  weight_shape: [4, 2, 3, 3]        # W  [Cout, Cin, kH, kW]
+  input_grad_shape: [1, 2, 4, 4]    # dX [N, Cin,  Hi, Wi]
+  weight_grad_shape: [4, 2, 3, 3]   # dW [Cout, Cin, kH, kW]
+  kernel_shape: [3, 3]
+  strides: [1, 1]
+  pads: [0, 0, 0, 0]
+  dilations: [1, 1]
+  group: 1
+
+# ConvGradXWB (combined dX + dW + dB, with bias — 3 outputs)
+convgradxwb:
+  output_grad_shape: [1, 4, 4, 4]   # dY [N, Cout, Ho, Wo]
+  input_shape: [1, 2, 4, 4]         # X  [N, Cin,  Hi, Wi]
+  weight_shape: [4, 2, 3, 3]        # W  [Cout, Cin, kH, kW]
+  input_grad_shape: [1, 2, 4, 4]    # dX [N, Cin,  Hi, Wi]
+  weight_grad_shape: [4, 2, 3, 3]   # dW [Cout, Cin, kH, kW]
+  kernel_shape: [3, 3]
+  strides: [1, 1]
+  pads: [1, 1, 1, 1]
+  dilations: [1, 1]
+  group: 1
+
+layernormgrad:
+  input_shape: [1, 8, 64]
+  axis: -1
+  epsilon: 0.00001
+  stash_type: 1
+
+softmax_grad:
+  input_shape: [1, 10]
+  axis: -1
+
+# GroupNormGrad merged node (GradXStat + GradX + GradW + GradB fused)
+groupnormgrad:
+  input_shape: [2, 8, 4, 4]   # [N, C, H, W]
+  num_groups: 4
+  epsilon: 0.001
+
+# GroupNorm gradient operators (individual nodes)
+groupnormgradx:
+  input_shape: [1, 8, 1, 64]
+  num_groups: 1
+  epsilon: 0.001
+
+groupnormgradw:
+  input_shape: [1, 8, 1, 64]
+  num_groups: 1
+  epsilon: 0.001
+
+groupnormgradb:
+  input_shape: [1, 8, 1, 64]
+  num_groups: 1
+  epsilon: 0.001
+
+# GeluGrad (com.microsoft training op)
+gelugrad:
+  input_shape: [1, 64]
+
+# MaxPoolGrad
+maxpoolgrad:
+  input_grad_shape: [1, 4, 4, 4]       # [N, C, Ho, Wo]
+  original_input_shape: [1, 4, 8, 8]   # [N, C, Hi, Wi]
+  kernel_shape: [2, 2]
+  strides: [2, 2]
+  pads: [0, 0, 0, 0]
+  ceil_mode: 0

@@ -2,8 +2,8 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Simple MLP PyTorch model."""
+"""Simple MLP PyTorch models."""
 
-from .simple_mlp import SimpleMLP
+from .simple_mlp import SimpleFlatMLP, SimpleMLP
 
-__all__ = ["SimpleMLP"]
+__all__ = ["SimpleMLP", "SimpleFlatMLP"]

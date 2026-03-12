@@ -33,6 +33,7 @@ class TestCCTInference:
     def test_cct_inference_export(self, model_test_dir, cct_config):
         """Test CCT model inference export with full verification."""
         exporter = CCTExporter(save_path=model_test_dir)
+        exporter._config_overrides = {k: v for k, v in cct_config.items()}
 
         expected_input_shape = [
             cct_config["batch_size"],
@@ -52,6 +53,7 @@ class TestCCTInference:
     def test_cct_inference_input_output_shapes(self, model_test_dir, cct_config):
         """Test CCT inference input/output shape consistency."""
         exporter = CCTExporter(save_path=model_test_dir)
+        exporter._config_overrides = {k: v for k, v in cct_config.items()}
 
         expected_input_shape = [
             cct_config["batch_size"],
@@ -74,6 +76,7 @@ class TestCCTInference:
         np.random.seed(42)
 
         exporter = CCTExporter(save_path=model_test_dir)
+        exporter._config_overrides = {k: v for k, v in cct_config.items()}
         exporter.config = exporter.load_config()
 
         # Create model
@@ -98,6 +101,7 @@ class TestCCTInference:
     def test_cct_onnxruntime_inference(self, model_test_dir, cct_config):
         """Test that exported CCT model can be run with ONNX Runtime."""
         exporter = CCTExporter(save_path=model_test_dir)
+        exporter._config_overrides = {k: v for k, v in cct_config.items()}
         onnx_file = exporter.export(mode="infer")
 
         # Create test input

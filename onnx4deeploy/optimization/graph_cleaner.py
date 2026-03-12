@@ -46,6 +46,13 @@ def remove_identity_nodes(input_onnx: str, output_onnx: str):
     for node in nodes_to_remove:
         graph.node.remove(node)
 
+    # Resolve chains: if A→B and B→C, update A→C so chained identities are fully removed.
+    for key in list(tensor_replacements.keys()):
+        val = tensor_replacements[key]
+        while val in tensor_replacements:
+            val = tensor_replacements[val]
+        tensor_replacements[key] = val
+
     # Update all references to removed Identity outputs
     for node in graph.node:
         for i, input_name in enumerate(node.input):
@@ -797,9 +804,245 @@ def optimize_softmax_axis(input_model_path: str, output_model_path: str):
     model.graph.node.extend(new_nodes)
     model.graph.value_info.extend(new_value_infos)
 
+    # Restore topological order: appending new_nodes to the end may break topo sort
+    # (e.g. if downstream nodes appear before the inserted Reshape+Softmax nodes).
+    # Re-sort via graphsurgeon when any change was made.
+    if optimized:
+        try:
+            import onnx_graphsurgeon as gs
+
+            g = gs.import_onnx(model)
+            g.cleanup().toposort()
+            model = gs.export_onnx(g)
+        except Exception:
+            pass  # If gs is unavailable fall back to unsorted (checker may still pass)
+
     # Save the optimized model
     print(f"Saving optimized model to {output_model_path}")
     onnx.save(model, output_model_path)
 
     print(f"Optimization complete. Modified {len(nodes_to_remove)} Softmax nodes.")
-    return optimized
+
+
+# ---------------------------------------------------------------------------
+# ConcatTraining / SplitTraining → Concat / Split canonicalization
+# ---------------------------------------------------------------------------
+
+
+def _get_tensor_dim(graph: onnx.GraphProto, tensor_name: str, axis: int):
+    """Return the size at *axis* for *tensor_name* by searching value_info/inputs."""
+    for vi in list(graph.input) + list(graph.value_info) + list(graph.output):
+        if vi.name == tensor_name:
+            t = vi.type.tensor_type
+            if t.HasField("shape") and len(t.shape.dim) > axis:
+                d = t.shape.dim[axis]
+                if d.dim_value > 0:
+                    return d.dim_value
+    return None
+
+
+def canonicalize_ms_training_ops(model: onnx.ModelProto) -> onnx.ModelProto:
+    """
+    Replace com.microsoft training-specific ops with standard ONNX equivalents.
+
+    ConcatTraining(A, B, axis=a) → (C, per_input_length)
+        becomes  Concat(A, B, axis=a) → C
+        (per_input_length is compile-time constant; only needed by SplitTraining)
+
+    SplitTraining(grad, per_input_length, axis=a) → (g_A, g_B)
+        becomes  one Slice node per LIVE output (dead outputs are dropped):
+            g_A = Slice(grad, start=0,    end=size_A, axes=[a])
+            g_B = Slice(grad, start=size_A, end=size_A+size_B, axes=[a])
+        Slice (not Split) is used because Deeploy supports Slice but not Split.
+        Dead outputs (no downstream consumers) are silently omitted.
+
+    Returns the modified model.
+    """
+    graph = model.graph
+
+    # -------------------------------------------------------------------
+    # Pass 1: Collect ConcatTraining info
+    #   ct_map: per_input_length_name → {'inputs': [...], 'axis': int}
+    # -------------------------------------------------------------------
+    ct_map: dict = {}
+    for node in graph.node:
+        if node.op_type != "ConcatTraining":
+            continue
+        axis = 1  # default
+        for attr in node.attribute:
+            if attr.name == "axis":
+                axis = attr.i
+        main_out = node.output[0] if len(node.output) > 0 else None
+        pil_name = node.output[1] if len(node.output) > 1 else None
+        if pil_name:
+            ct_map[pil_name] = {"inputs": list(node.input), "axis": axis, "main_out": main_out}
+
+    n_concat = sum(1 for n in graph.node if n.op_type == "ConcatTraining")
+    n_split = sum(1 for n in graph.node if n.op_type == "SplitTraining")
+    if n_concat == 0 and n_split == 0:
+        return model
+    print(
+        f"  canonicalize_ms_training_ops: found {n_concat} ConcatTraining, {n_split} SplitTraining"
+    )
+
+    # -------------------------------------------------------------------
+    # Pass 2: Collect SplitTraining info.
+    #   Key: first output name of the SplitTraining node (stable identifier).
+    # -------------------------------------------------------------------
+    # split_replacements: first_output_name → {"sizes": [...], "axis": int, "inputs": [...], "outputs": [...]}
+    split_replacements: dict = {}
+    for node in graph.node:
+        if node.op_type != "SplitTraining":
+            continue
+        first_out = node.output[0] if len(node.output) > 0 else None
+        if first_out is None:
+            continue
+        pil_name = node.input[1] if len(node.input) > 1 else None
+        if pil_name is None:
+            print(f"  WARNING: SplitTraining has no per_input_length input — skipping")
+            continue
+        axis = 1
+        for attr in node.attribute:
+            if attr.name == "axis":
+                axis = attr.i
+        ct_info = ct_map.get(pil_name)
+        if ct_info is None:
+            print(f"  WARNING: SplitTraining references unknown per_input_length '{pil_name}'")
+            continue
+        # Derive split sizes from ConcatTraining inputs
+        sizes = []
+        for inp_name in ct_info["inputs"]:
+            sz = _get_tensor_dim(graph, inp_name, ct_info["axis"])
+            if sz is None:
+                print(f"  WARNING: Cannot infer dim for '{inp_name}' along axis={ct_info['axis']}")
+                sz = 0
+            sizes.append(sz)
+        split_replacements[first_out] = {
+            "sizes": sizes,
+            "axis": axis,
+            "inputs": list(node.input),
+            "outputs": list(node.output),
+            "pil_name": pil_name,
+        }
+
+    # -------------------------------------------------------------------
+    # Pass 3: Build replacement nodes and collect op-type/output sets
+    #   to identify which original nodes to drop.
+    #   Use output names as stable identifiers (not id(), which is
+    #   unstable across protobuf field accesses).
+    # -------------------------------------------------------------------
+    new_nodes: list = []
+    # Sets of first-output-names to drop from original graph.node list
+    concat_training_main_outs: set = set()  # main outputs of ConcatTraining
+    split_training_first_outs: set = set(split_replacements.keys())
+
+    # Track per_input_length output names to remove from value_info later
+    pil_names_to_remove: set = set(ct_map.keys())
+
+    # Replace ConcatTraining → Concat
+    for node in graph.node:
+        if node.op_type != "ConcatTraining":
+            continue
+        axis = 1
+        for attr in node.attribute:
+            if attr.name == "axis":
+                axis = attr.i
+        new_node = helper.make_node(
+            "Concat",
+            inputs=list(node.input),
+            outputs=[node.output[0]],  # drop per_input_length output
+            axis=axis,
+        )
+        new_nodes.append(new_node)
+        concat_training_main_outs.add(node.output[0])
+
+    # Replace SplitTraining → one Slice per LIVE output.
+    # Slice is in Deeploy's PULPOpen platform; Split is not.
+    # Dead outputs (no consumers) are silently skipped.
+
+    # Build consumer map: tensor_name → True/False (any consumer exists)
+    consumers: set = set()
+    for nd in graph.node:
+        for inp in nd.input:
+            if inp:
+                consumers.add(inp)
+    graph_outputs_set: set = {o.name for o in graph.output}
+
+    for first_out, info in split_replacements.items():
+        sizes = info["sizes"]
+        axis = info["axis"]
+        grad_input = info["inputs"][0]
+        pil_name = info["pil_name"]
+        outputs = info["outputs"]
+
+        # Compute cumulative starts/ends for each output slice
+        cumulative = 0
+        for i, (out_name, sz) in enumerate(zip(outputs, sizes)):
+            start = cumulative
+            end = cumulative + sz
+            cumulative += sz
+
+            # Skip dead outputs (no downstream consumers and not a graph output)
+            if out_name not in consumers and out_name not in graph_outputs_set:
+                continue
+
+            # Create initializers for starts, ends, axes (ONNX Slice opset 13+)
+            uid = f"_slct_{pil_name.replace('/', '_')}_{i}"
+            starts_name = uid + "_starts"
+            ends_name = uid + "_ends"
+            axes_name = uid + "_axes"
+            graph.initializer.append(
+                numpy_helper.from_array(np.array([start], dtype=np.int64), name=starts_name)
+            )
+            graph.initializer.append(
+                numpy_helper.from_array(np.array([end], dtype=np.int64), name=ends_name)
+            )
+            graph.initializer.append(
+                numpy_helper.from_array(np.array([axis], dtype=np.int64), name=axes_name)
+            )
+            new_node = helper.make_node(
+                "Slice",
+                inputs=[grad_input, starts_name, ends_name, axes_name],
+                outputs=[out_name],
+            )
+            new_nodes.append(new_node)
+            print(
+                f"  SplitTraining[{i}] → Slice({grad_input!r}, {start}:{end}, axis={axis}) → {out_name!r}"
+            )
+
+        # per_input_length is now dead
+        pil_names_to_remove.add(pil_name)
+
+    # -------------------------------------------------------------------
+    # Pass 4: Rebuild graph.node list — drop replaced nodes, add new ones
+    # -------------------------------------------------------------------
+    original_nodes = list(graph.node)
+    del graph.node[:]
+    for node in original_nodes:
+        main_out = node.output[0] if len(node.output) > 0 else None
+        if node.op_type == "ConcatTraining" and main_out in concat_training_main_outs:
+            continue  # replaced
+        if node.op_type == "SplitTraining" and main_out in split_training_first_outs:
+            continue  # replaced
+        graph.node.append(node)
+    for node in new_nodes:
+        graph.node.append(node)
+
+    # -------------------------------------------------------------------
+    # Pass 5: Remove orphaned per_input_length value_info entries
+    # -------------------------------------------------------------------
+    remaining_vi = [vi for vi in graph.value_info if vi.name not in pil_names_to_remove]
+    del graph.value_info[:]
+    for vi in remaining_vi:
+        graph.value_info.append(vi)
+
+    n_replaced = len(concat_training_main_outs) + len(split_training_first_outs)
+    print(f"  Replaced {n_replaced} Microsoft training op(s) with standard ONNX equivalents.")
+    return model
+
+
+def canonicalize_ms_training_ops_file(input_path: str, output_path: str) -> None:
+    """File-based wrapper for canonicalize_ms_training_ops."""
+    model = onnx.load(input_path)
+    model = canonicalize_ms_training_ops(model)
+    onnx.save(model, output_path)
