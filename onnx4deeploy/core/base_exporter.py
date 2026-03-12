@@ -490,18 +490,17 @@ class BaseONNXExporter(ABC):
 
         # Determine trainable / frozen parameters.
         # BatchNorm running statistics (running_mean, running_var, num_batches_tracked)
-        # are non-differentiable buffers updated via EMA, not backprop.  They must be
-        # excluded from BOTH lists:
-        #   - in requires_grad → generate_artifacts tries to build gradient nodes → crash
-        #   - in frozen_params → inlined as constants → can't be updated at inference
+        # are non-differentiable buffers updated via EMA, not backprop.  They must go
+        # into frozen_params (not requires_grad).  Omitting them from both lists causes
+        # ORT to treat them as trainable by default → tries to build gradient nodes → crash.
         _BN_BUFFERS = ("running_mean", "running_var", "num_batches_tracked")
-        all_param_names = [init.name for init in onnx_model.graph.initializer]
-        all_param_names = [
-            n for n in all_param_names if not any(n.endswith(s) for s in _BN_BUFFERS)
+        all_initializer_names = [init.name for init in onnx_model.graph.initializer]
+        bn_buffer_names = [
+            n for n in all_initializer_names if any(n.endswith(s) for s in _BN_BUFFERS)
         ]
+        all_param_names = [n for n in all_initializer_names if n not in bn_buffer_names]
         requires_grad = self.get_trainable_params(all_param_names)
-        requires_grad = [n for n in requires_grad if not any(n.endswith(s) for s in _BN_BUFFERS)]
-        frozen_params = [name for name in all_param_names if name not in requires_grad]
+        frozen_params = [n for n in all_param_names if n not in requires_grad] + bn_buffer_names
 
         print(f"\n🔹 Trainable parameters: {len(requires_grad)}")
         print(f"🔹 Frozen parameters: {len(frozen_params)}")
