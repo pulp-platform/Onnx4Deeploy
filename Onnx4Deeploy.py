@@ -148,6 +148,9 @@ def list_available_models():
             "description": "MI-BMInet (Motor Imagery BMI)",
             "input_shape": "(B, 1, 8, 2000)",
             "classes": 2,
+            # Small config for on-chip testing (Siracusa L2=2MB).
+            # Default T=2000 needs ~49MB L2; T=128 needs ~1.4MB.
+            "config": {"time_steps": 128, "F1": 4, "Nf": 16, "Nf2": 4},
         },
         "SleepConViT": {
             "class": SleepConViTExporter,

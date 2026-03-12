@@ -278,7 +278,7 @@ class ResNetExporter(BaseONNXExporter):
 
         outputs_dict: dict = {k: v for k, v in current_weights.items()}
         outputs_dict["loss"] = np.array(all_losses, dtype=np.float32)
-        print(f"   Reference losses: {all_losses}")
+        print(f"   Collected {len(all_losses)} reference losses: {all_losses}")
 
         # Build inputs.npz
         final_model = onnx.load(self.paths["network"])

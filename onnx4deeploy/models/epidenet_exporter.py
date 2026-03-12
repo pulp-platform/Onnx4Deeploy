@@ -11,9 +11,7 @@ import numpy as np
 import torch
 
 from ..core.base_exporter import BaseONNXExporter
-
-# Use EpiDeNetDeploy: LayerNorm-based, no dropout, AvgPool — ONNX training compatible.
-from .pytorch_models.epidenet import EpiDeNetDeploy
+from .pytorch_models.epidenet import EpiDeNet
 
 
 class EpiDeNetExporter(BaseONNXExporter):
@@ -64,16 +62,12 @@ class EpiDeNetExporter(BaseONNXExporter):
 
     def create_model(self) -> torch.nn.Module:
         """
-        Create EpiDeNetDeploy PyTorch model.
-
-        EpiDeNetDeploy uses LayerNorm (instead of BatchNorm) and AvgPool
-        (instead of MaxPool), making it fully compatible with ONNX training
-        graph generation.
+        Create EpiDeNet PyTorch model.
 
         Returns:
-            EpiDeNetDeploy model ready for export
+            EpiDeNet model ready for export
         """
-        model = EpiDeNetDeploy(
+        model = EpiDeNet(
             C=self.model_config["channels"],
             T=self.model_config["time_steps"],
             output_classes=self.model_config["num_classes"],
@@ -101,7 +95,7 @@ class EpiDeNetExporter(BaseONNXExporter):
 
         Strategies:
         - "full":       Train everything — no frozen params (default, PULP-safe)
-        - "norm_only":  Freeze all conv weights; train LayerNorm affines + classifier
+        - "norm_only":  Freeze all conv weights; train BatchNorm affines + classifier
         - "last_layer": Freeze everything except the final classifier (fcn*)
         - "custom":     Explicit list from config["custom_trainable_params"]
 

@@ -17,7 +17,7 @@ from .conv2d import Conv2DOperatorTest
 from .conv_grad_b import ConvGradBOperatorTest
 from .conv_grad_w import ConvGradWOperatorTest
 from .conv_grad_x import ConvGradXOperatorTest
-from .conv_grad_xw import ConvGradXWOperatorTest
+from .conv_grad_xw import ConvGradXWOperatorTest, ConvGradXWPaddedOperatorTest
 from .conv_grad_xwb import ConvGradXWBOperatorTest
 from .gelu_grad import GeluGradOperatorTest
 from .gemm import GemmOperatorTest
@@ -83,6 +83,7 @@ __all__ = [
     "ConvGradXOperatorTest",
     "ConvGradWOperatorTest",
     "ConvGradXWOperatorTest",
+    "ConvGradXWPaddedOperatorTest",
     "ConvGradXWBOperatorTest",
     "ConvGradBOperatorTest",
     "GeluGradOperatorTest",

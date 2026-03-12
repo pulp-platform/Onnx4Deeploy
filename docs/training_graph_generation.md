@@ -57,9 +57,9 @@ All models below support both `--mode infer` and `--mode train`.
 | Simple MLP | `SimpleMlpExporter` | `SimpleMLP` | `(1, 64)` | Reference model; MNIST training supported |
 | Lightweight CNN | `LightweightCnnExporter` | `LightweightCNN` | `(1, 1, 28, 28)` | MNIST/random data |
 | MI-BMInet | `MIBMInetExporter` | `MIBMInet` | `(1, 1, 8, 2000)` | EEG motor imagery; LayerNorm-based |
+| EpiDeNet | `EpiDeNetExporter` | `EpiDeNet` | `(1, 1, 8, 2000)` | Epilepsy detection |
 | SleepConViT | `SleepConViTExporter` | `SleepConViT` | `(1, 1, 1, 3000)` | 1-D conv transformer; tiling supported |
 | CCT | `CCTExporter` | `CCT` | `(1, 3, 32, 32)` | Compact vision transformer |
-| EpiDeNet | `EpiDeNetExporter` | `EpiDeNet` | `(1, 1, 8, 2000)` | Epilepsy detection |
 
 ### MLperf Tiny Benchmarks
 

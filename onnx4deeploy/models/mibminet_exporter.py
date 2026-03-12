@@ -12,8 +12,9 @@ import torch
 
 from ..core.base_exporter import BaseONNXExporter
 
-# MIBMINetDeploy: LayerNorm-based, no dropout — ONNX training compatible.
-from .pytorch_models.mibminet import MIBMINetDeploy
+# MIBMINetInference: original MibmiNet architecture with BatchNorm2d, no dropout —
+# ONNX training compatible (no explicit padding layers; spatial dims shrink naturally).
+from .pytorch_models.mibminet import MIBMINetInference
 
 
 class MIBMInetExporter(BaseONNXExporter):
@@ -69,15 +70,16 @@ class MIBMInetExporter(BaseONNXExporter):
 
     def create_model(self) -> torch.nn.Module:
         """
-        Create MIBMINetDeploy PyTorch model.
+        Create MIBMINetInference PyTorch model.
 
-        MIBMINetDeploy uses LayerNorm (instead of BatchNorm) and no dropout,
-        making it fully compatible with ONNX training graph generation.
+        MIBMINetInference uses BatchNorm2d (original MibmiNet normalisation) and
+        no dropout, making it fully compatible with ONNX training graph generation.
+        Spatial dimensions shrink naturally (no explicit ZeroPad layers).
 
         Returns:
-            MIBMINetDeploy model ready for export
+            MIBMINetInference model ready for export
         """
-        model = MIBMINetDeploy(
+        model = MIBMINetInference(
             F1=self.model_config["F1"],
             D=self.model_config["D"],
             C=self.model_config["channels"],
@@ -110,7 +112,7 @@ class MIBMInetExporter(BaseONNXExporter):
 
         Strategies:
         - "full":       Train everything — no frozen params (default, PULP-safe)
-        - "norm_only":  Freeze all conv/sep_conv weights; train LayerNorm affines + classifier
+        - "norm_only":  Freeze all conv/sep_conv weights; train BatchNorm affines + classifier
         - "last_layer": Freeze everything except the final classifier (fc*)
         - "custom":     Explicit list from config["custom_trainable_params"]
 

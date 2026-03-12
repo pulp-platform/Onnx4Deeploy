@@ -182,5 +182,27 @@ class ConvGradXWOperatorTest(BaseOperatorTest):
         }
 
 
+class ConvGradXWPaddedOperatorTest(ConvGradXWOperatorTest):
+    """ConvGradXW with asymmetric padding — uses convgradxw_padded config key."""
+
+    def load_config(self) -> Dict[str, Any]:
+        # Call grandparent load_config to get raw config dict
+        from .base_operator import BaseOperatorTest
+
+        config = BaseOperatorTest.load_config(self)
+        cfg = config.get("convgradxw_padded", {})
+        self.output_grad_shape = tuple(cfg.get("output_grad_shape", [1, 4, 5, 3]))
+        self.input_shape = tuple(cfg.get("input_shape", [1, 2, 4, 4]))
+        self.weight_shape = tuple(cfg.get("weight_shape", [4, 2, 3, 3]))
+        self.input_grad_shape = tuple(cfg.get("input_grad_shape", [1, 2, 4, 4]))
+        self.weight_grad_shape = tuple(cfg.get("weight_grad_shape", [4, 2, 3, 3]))
+        self.kernel_shape = cfg.get("kernel_shape", [3, 3])
+        self.strides = cfg.get("strides", [1, 1])
+        self.pads = cfg.get("pads", [1, 0, 2, 1])
+        self.dilations = cfg.get("dilations", [1, 1])
+        self.group = cfg.get("group", 1)
+        return config
+
+
 # Legacy alias used by Onnx4Deeploy.py CLI ("ConvGradXW" → snake_case "conv_grad_xw")
 ConvGradOperatorTest = ConvGradXWOperatorTest

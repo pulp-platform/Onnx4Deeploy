@@ -57,7 +57,9 @@ def run_train_onnx_optimization(
         convert_reducesum_axes_to_attr,
         convert_squeeze_unsqueeze_input_to_attr,
         convert_sum_to_add,
+        fuse_global_average_pool_grad,
         fuse_matmul_add_to_gemm,
+        fuse_mse_loss,
         optimize_reshape_fusion,
         optimize_softmax_axis,
         process_onnx_model_name_with_type,
@@ -124,6 +126,12 @@ def run_train_onnx_optimization(
 
     convert_sum_to_add(onnx_output_file, onnx_output_file)
     print(f"✅ Successfully converted Sum to Add nodes. Saved as {onnx_output_file}")
+
+    fuse_global_average_pool_grad(onnx_output_file, onnx_output_file)
+    print(f"✅ Successfully fused GlobalAveragePool backward. Saved as {onnx_output_file}")
+
+    fuse_mse_loss(onnx_output_file, onnx_output_file)
+    print(f"✅ Successfully fused MSE loss nodes. Saved as {onnx_output_file}")
 
     rename_softmaxgrad_op(onnx_output_file, onnx_output_file)
     print(f"✅ Successfully renamed SoftmaxGrad nodes. Saved as {onnx_output_file}")

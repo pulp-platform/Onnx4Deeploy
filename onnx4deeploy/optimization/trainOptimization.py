@@ -2897,3 +2897,332 @@ def convert_frozen_initializers_to_constants(
         f"   convert_frozen_initializers_to_constants: "
         f"converted {len(frozen_param_names)} frozen param(s) → Constant nodes."
     )
+
+
+def fuse_global_average_pool_grad(input_model_path: str, output_model_path: str) -> None:
+    """Fuse the GlobalAveragePool backward decomposition into a single GlobalAveragePoolGrad op.
+
+    ORT decomposes GAP backward as:
+        Shape(X[N,C,H,W])                        → x_shape [4]
+        com.microsoft.Scale(dY[N,C,1,1], 1/(H*W)) → scaled_dY [N,C,1,1]
+        Expand(scaled_dY, x_shape)               → dX [N,C,H,W]
+
+    This fuses to:
+        GlobalAveragePoolGrad(dY)  attrs: kernel_shape=[H,W]  → dX [N,C,H,W]
+
+    H and W are read from X's static shape (stored as an attribute so the
+    Deeploy parser does not need X as an input at runtime).
+    """
+    model = onnx.load(input_model_path)
+    graph = model.graph
+
+    # ------------------------------------------------------------------ #
+    # Build producer maps                                                   #
+    # ------------------------------------------------------------------ #
+    # output_name → node that produces it
+    producer: dict = {}
+    for node in graph.node:
+        for out in node.output:
+            if out:
+                producer[out] = node
+
+    # tensor_name → shape from value_info / graph inputs / initializers
+    def get_static_shape(name: str):
+        for vi in list(graph.value_info) + list(graph.input) + list(graph.output):
+            if vi.name == name:
+                dims = vi.type.tensor_type.shape.dim
+                if dims:
+                    shape = [d.dim_value for d in dims]
+                    if all(s > 0 for s in shape):
+                        return shape
+        return None
+
+    # ------------------------------------------------------------------ #
+    # Find fusion candidates                                               #
+    # ------------------------------------------------------------------ #
+    # We look for: Expand node whose inputs are:
+    #   [0] = output of a com.microsoft.Scale node
+    #   [1] = output of a Shape node
+    nodes_to_remove: list = []
+    new_nodes: list = []
+
+    for node in list(graph.node):
+        if node.op_type != "Expand":
+            continue
+        if len(node.input) < 2:
+            continue
+
+        scaled_dY_name = node.input[0]
+        x_shape_name = node.input[1]
+
+        # Check that scaled_dY comes from com.microsoft.Scale
+        scale_node = producer.get(scaled_dY_name)
+        if scale_node is None:
+            continue
+        if scale_node.op_type != "Scale" and scale_node.op_type != "com.microsoft.Scale":
+            continue
+        if len(scale_node.input) < 1:
+            continue
+
+        # Check that x_shape comes from a Shape node
+        shape_node = producer.get(x_shape_name)
+        if shape_node is None:
+            continue
+        if shape_node.op_type != "Shape":
+            continue
+        if len(shape_node.input) < 1:
+            continue
+
+        dY_name = scale_node.input[0]  # upstream gradient [N, C, 1, 1]
+        X_name = shape_node.input[0]  # original forward input [N, C, H, W]
+        dX_name = node.output[0]  # output gradient [N, C, H, W]
+
+        # Derive H, W from X's static shape
+        x_shape = get_static_shape(X_name)
+        if x_shape is None or len(x_shape) < 4:
+            print(
+                f"  ⚠️  fuse_global_average_pool_grad: cannot determine X shape for {X_name}, skipping"
+            )
+            continue
+
+        H, W = int(x_shape[2]), int(x_shape[3])
+
+        # Build the fused GlobalAveragePoolGrad node
+        fused_node = helper.make_node(
+            op_type="GlobalAveragePoolGrad",
+            inputs=[dY_name],
+            outputs=[dX_name],
+            name=f"{node.name or 'GAP_Grad'}_fused",
+            kernel_shape=[H, W],
+        )
+
+        nodes_to_remove += [scale_node, shape_node, node]
+        new_nodes.append((node, fused_node))  # (original Expand, replacement)
+
+        print(
+            f"  ✅ Fused GAP backward: Scale+Shape+Expand → GlobalAveragePoolGrad "
+            f"(dY={dY_name}, dX={dX_name}, H={H}, W={W})"
+        )
+
+    if not new_nodes:
+        print("  ℹ️  fuse_global_average_pool_grad: no GAP backward pattern found")
+        onnx.save(model, output_model_path)
+        return
+
+    # ------------------------------------------------------------------ #
+    # Rebuild node list                                                    #
+    # ------------------------------------------------------------------ #
+    remove_set = set(id(n) for n in nodes_to_remove)
+    insertion_map = {id(orig): repl for orig, repl in new_nodes}
+
+    new_node_list = []
+    for node in graph.node:
+        if id(node) in remove_set:
+            if id(node) in insertion_map:
+                new_node_list.append(insertion_map[id(node)])
+        else:
+            new_node_list.append(node)
+
+    del graph.node[:]
+    graph.node.extend(new_node_list)
+
+    onnx.save(model, output_model_path)
+
+
+def fuse_mse_loss(input_model_path: str, output_model_path: str) -> None:
+    """Fuse MSELoss forward+backward into MSELoss + MSELossGrad."""
+    model = onnx.load(input_model_path)
+    graph = model.graph
+    producer = {}
+    for node in graph.node:
+        for out in node.output:
+            if out:
+                producer[out] = node
+    consumers = {}
+    for node in graph.node:
+        for inp in node.input:
+            if inp:
+                consumers.setdefault(inp, []).append(node)
+    init_values = {}
+    for init in graph.initializer:
+        init_values[init.name] = numpy_helper.to_array(init)
+    mse_patterns = []
+    for pow_node in list(graph.node):
+        if pow_node.op_type != "Pow" or len(pow_node.input) < 2:
+            continue
+        diff_name = pow_node.input[0]
+        exp_name = pow_node.input[1]
+        sq_name = pow_node.output[0]
+        if exp_name not in init_values:
+            continue
+        exp_arr = init_values[exp_name]
+        if not (exp_arr.size == 1 and float(exp_arr.flat[0]) == 2.0):
+            continue
+        sub_fwd = producer.get(diff_name)
+        if sub_fwd is None or sub_fwd.op_type != "Sub":
+            continue
+        output_name = sub_fwd.input[0]
+        target_name = sub_fwd.input[1]
+        reduce_mean_node = size_x_node = shape_x_node = None
+        for c in consumers.get(sq_name, []):
+            if c.op_type == "ReduceMean":
+                reduce_mean_node = c
+            elif c.op_type == "Size":
+                size_x_node = c
+            elif c.op_type == "Shape":
+                shape_x_node = c
+        if None in (reduce_mean_node, size_x_node, shape_x_node):
+            continue
+        loss_name = reduce_mean_node.output[0]
+        sized_x_name = size_x_node.output[0]
+        shaped_x_name = shape_x_node.output[0]
+        size_grad_node = None
+        loss_grad_name = None
+        for iname, ival in init_values.items():
+            if ival.shape == () and float(ival) == 1.0 and "reducemean_output" in iname:
+                for c in consumers.get(iname, []):
+                    if c.op_type == "Size":
+                        size_grad_node = c
+                        loss_grad_name = iname
+                        break
+            if size_grad_node:
+                break
+        if size_grad_node is None:
+            continue
+        sized_grad_name = size_grad_node.output[0]
+        div_node = None
+        for c in consumers.get(sized_x_name, []):
+            if c.op_type == "Div" and sized_grad_name in c.input:
+                div_node = c
+                break
+        if div_node is None:
+            continue
+        scale_val_name = div_node.output[0]
+        scale_node = None
+        for c in consumers.get(loss_grad_name, []):
+            if c.op_type == "Scale" and scale_val_name in c.input:
+                scale_node = c
+                break
+        if scale_node is None:
+            continue
+        scaled_g_name = scale_node.output[0]
+        expand_node = None
+        for c in consumers.get(scaled_g_name, []):
+            if c.op_type == "Expand" and shaped_x_name in c.input:
+                expand_node = c
+                break
+        if expand_node is None:
+            continue
+        sq_grad_name = expand_node.output[0]
+        sub_exp_node = None
+        for c in consumers.get(exp_name, []):
+            if c.op_type == "Sub" and c is not sub_fwd:
+                sub_exp_node = c
+                break
+        if sub_exp_node is None:
+            continue
+        exp_m1_name = sub_exp_node.output[0]
+        pow_back_node = None
+        for c in consumers.get(diff_name, []):
+            if c.op_type == "Pow" and exp_m1_name in c.input:
+                pow_back_node = c
+                break
+        if pow_back_node is None:
+            continue
+        diff_p1_name = pow_back_node.output[0]
+        mul_two_node = None
+        for c in consumers.get(diff_p1_name, []):
+            if c.op_type == "Mul" and exp_name in c.input:
+                mul_two_node = c
+                break
+        if mul_two_node is None:
+            continue
+        two_diff_name = mul_two_node.output[0]
+        mul_final_node = None
+        for c in consumers.get(two_diff_name, []):
+            if c.op_type == "Mul" and sq_grad_name in c.input:
+                mul_final_node = c
+                break
+        if mul_final_node is None:
+            continue
+        diff_grad_name = mul_final_node.output[0]
+        mse_patterns.append(
+            {
+                "output_name": output_name,
+                "target_name": target_name,
+                "loss_name": loss_name,
+                "diff_grad_name": diff_grad_name,
+                "nodes_to_remove": [
+                    sub_fwd,
+                    pow_node,
+                    reduce_mean_node,
+                    size_x_node,
+                    shape_x_node,
+                    size_grad_node,
+                    div_node,
+                    scale_node,
+                    expand_node,
+                    sub_exp_node,
+                    pow_back_node,
+                    mul_two_node,
+                    mul_final_node,
+                ],
+            }
+        )
+    if not mse_patterns:
+        print("  INFO fuse_mse_loss: no MSE loss pattern found, skipping")
+        import shutil
+
+        if input_model_path != output_model_path:
+            shutil.copy(input_model_path, output_model_path)
+        return
+    for pattern in mse_patterns:
+        output_name = pattern["output_name"]
+        target_name = pattern["target_name"]
+        loss_name = pattern["loss_name"]
+        diff_grad_name = pattern["diff_grad_name"]
+        nodes_to_remove = pattern["nodes_to_remove"]
+        remove_set = set(id(n) for n in nodes_to_remove)
+        insert_idx = len(graph.node)
+        for i, node in enumerate(graph.node):
+            if id(node) in remove_set:
+                insert_idx = i
+                break
+        fwd_node = helper.make_node(
+            op_type="MSELoss",
+            inputs=[output_name, target_name],
+            outputs=[loss_name],
+            name="MSELoss_fused",
+        )
+        bwd_node = helper.make_node(
+            op_type="MSELossGrad",
+            inputs=[output_name, target_name],
+            outputs=[diff_grad_name],
+            name="MSELossGrad_fused",
+        )
+        new_nodes = []
+        inserted = False
+        for i, node in enumerate(graph.node):
+            if i == insert_idx and not inserted:
+                new_nodes.append(fwd_node)
+                new_nodes.append(bwd_node)
+                inserted = True
+            if id(node) not in remove_set:
+                new_nodes.append(node)
+        if not inserted:
+            new_nodes.append(fwd_node)
+            new_nodes.append(bwd_node)
+        del graph.node[:]
+        graph.node.extend(new_nodes)
+        used_inputs = set()
+        for node in graph.node:
+            for inp in node.input:
+                if inp:
+                    used_inputs.add(inp)
+        kept_inits = [init for init in graph.initializer if init.name in used_inputs]
+        removed_names = [init.name for init in graph.initializer if init.name not in used_inputs]
+        del graph.initializer[:]
+        graph.initializer.extend(kept_inits)
+        print("  fuse_mse_loss: fused -> MSELoss + MSELossGrad")
+        print("    Removed unused initializers:", removed_names)
+    onnx.save(model, output_model_path)
