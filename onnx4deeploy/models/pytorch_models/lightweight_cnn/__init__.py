@@ -5,5 +5,6 @@
 """Lightweight CNN PyTorch model."""
 
 from .lightweight_cnn import LightweightCNN
+from .qlite_cnn import QLiteCNN
 
-__all__ = ["LightweightCNN"]
+__all__ = ["LightweightCNN", "QLiteCNN"]

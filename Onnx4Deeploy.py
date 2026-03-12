@@ -34,6 +34,7 @@ def list_available_models():
         CCTExporter,
         EpiDeNetExporter,
         LightweightCnnExporter,
+        QLiteCnnExporter,
         MambaExporter,
         MIBMInetExporter,
         MobileNetV2Exporter,
@@ -137,6 +138,12 @@ def list_available_models():
         "LightweightCNN": {
             "class": LightweightCnnExporter,
             "description": "Lightweight CNN (Compact CNN for image classification)",
+            "input_shape": "(B, 1, 28, 28)",
+            "classes": 10,
+        },
+        "QLiteCNN": {
+            "class": QLiteCnnExporter,
+            "description": "QLite CNN (Compact CNN for image classification)",
             "input_shape": "(B, 1, 28, 28)",
             "classes": 10,
         },
@@ -301,15 +308,21 @@ def generate_model(model_name: str, mode: str, output_path: Optional[str] = None
         if mode == "infer":
             onnx_file = exporter.export_inference()
             mode_desc = "Inference mode"
+        elif mode == "q-infer":
+            onnx_file = exporter.export_inference(quant=True)
+            mode_desc = "Quantized Inference mode"
         elif mode == "train":
             onnx_file = exporter.export_training()
             mode_desc = "Training mode"
         elif mode == "zo-train":
             onnx_file = exporter.export_zo_training()
             mode_desc = "Zeroth-order Training mode"
+        elif mode == "q-zo-train":
+            onnx_file = exporter.export_zo_training(quant=True)
+            mode_desc = "Quantized Zeroth-order Training mode"
         else:
             print(f"❌ Unknown mode: {mode}")
-            print("   Available modes: infer, train, zo-train")
+            print("   Available modes: infer, train, zo-train, q-infer, q-zo-train")
             sys.exit(1)
 
         print(f"\n{'='*70}")
@@ -323,7 +336,7 @@ def generate_model(model_name: str, mode: str, output_path: Optional[str] = None
         files_to_check = ["network.onnx", "inputs.npz", "outputs.npz"]
         if mode == "train":
             files_to_check.extend(["network_train.onnx", "optimizer_model.onnx"])
-        elif mode == "zo-train":
+        elif mode in ["zo-train", "q-zo-train"]:
             files_to_check.append("network_zo.onnx")
         
         for file in files_to_check:
@@ -420,9 +433,9 @@ Examples:
         "-mode",
         "--mode",
         type=str,
-        choices=["infer", "train", "zo-train"],
+        choices=["infer", "train", "zo-train", "q-infer", "q-zo-train"],
         default="infer",
-        help="Model export mode: infer (inference), train (BP training), or zo-train (zeroth-order training) [default: infer]",
+        help="Model export mode: infer (inference), train (BP training), zo-train (zeroth-order training), q-infer (quantized inference), or q-zo-train (quantized zeroth-order training) [default: infer]",
     )
 
     # Output path

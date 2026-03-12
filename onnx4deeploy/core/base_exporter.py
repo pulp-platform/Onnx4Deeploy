@@ -25,6 +25,8 @@ import torch
 from onnx import helper
 from onnxruntime.training import artifacts
 
+from DeepQuant.DeepQuant.Export4Deeploy import exportBrevitas
+
 from .onnx_utils import print_model_info, randomize_onnx_initializers
 from onnx4deeploy.transform.zo_transform import generate_zo_graph
 
@@ -304,7 +306,7 @@ class BaseONNXExporter(ABC):
         onnx_model = onnx.load_model_from_string(f.getvalue())
         return onnx_model
 
-    def export_inference(self, save_path: Optional[str] = None) -> str:
+    def export_inference(self, save_path: Optional[str] = None, quant: bool = False) -> str:
         """
         Export model in inference mode.
 
@@ -335,15 +337,24 @@ class BaseONNXExporter(ABC):
         input_tensor = torch.randn(*input_shape, dtype=torch.float32)
         print(f"   Input shape: {input_shape}")
 
-        # initialize weights and biases for testing
-        for param in model.parameters():
-            if param.requires_grad:
-                torch.nn.init.normal_(param, mean=0.0, std=0.02)
-        # Export to ONNX
-        print("\n📤 Exporting to ONNX...")
-        opset_version = self.config.get("opset_version", 12)
-        onnx_model = self._export_to_onnx(model, input_tensor, opset_version)
-
+        if not quant:
+            # initialize weights and biases for testing
+            for param in model.parameters():
+                if param.requires_grad:
+                    torch.nn.init.normal_(param, mean=0.0, std=0.02)
+            # Export to ONNX
+            print("\n📤 Exporting to ONNX...")
+            opset_version = self.config.get("opset_version", 12)
+            onnx_model = self._export_to_onnx(model, input_tensor, opset_version)
+        
+        elif quant:
+            # load weights.
+            state_dict = torch.load(os.path.join(os.getcwd(), self.config.get("weights_path", "model_weights.pth")), map_location="cpu")
+            model.load_state_dict(state_dict, strict=False)
+            print("\n📤 Exporting to ONNX with quantization...")
+            # use DeepQuant to export to ONNX
+            onnx_model = exportBrevitas(model, input_tensor, debug=False)
+                    
         # Save
         onnx.save(onnx_model, self.paths["network"])
         print(f"✅ ONNX model saved: {self.paths['network']}")
@@ -499,7 +510,7 @@ class BaseONNXExporter(ABC):
 
         return self.paths["network"]
 
-    def export_zo_training(self, save_path: Optional[str] = None) -> str:
+    def export_zo_training(self, save_path: Optional[str] = None, quant: bool = False) -> str:
         """
         Export model in zeroth-order training mode.
 
@@ -679,5 +690,9 @@ class BaseONNXExporter(ABC):
             return self.export_inference(save_path)
         elif mode == "zo-train":
             return self.export_zo_training(save_path)
+        elif mode =="q-infer":
+            return self.export_inference(save_path, quant=True)
+        elif mode == "q-zo-train":
+            return self.export_zo_training(save_path, quant=True)
         else:
             raise ValueError(f"Invalid mode: {mode}. Must be 'train' or 'infer'")

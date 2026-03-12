@@ -1,0 +1,3 @@
+[submodule "DeepQuant"]
+	path = DeepQuant
+	url = https://github.com/JanCSEM/DeepQuant.git

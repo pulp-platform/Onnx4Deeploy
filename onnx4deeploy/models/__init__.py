@@ -7,6 +7,7 @@
 from .cct_exporter import CCTExporter
 from .epidenet_exporter import EpiDeNetExporter
 from .lightweight_cnn_exporter import LightweightCnnExporter
+from .qlite_cnn_exporter import QLiteCnnExporter
 from .mamba_exporter import MambaExporter
 from .mibminet_exporter import MIBMInetExporter
 from .mobilenetv2_exporter import MobileNetV2Exporter
@@ -19,6 +20,7 @@ __all__ = [
     "CCTExporter",
     "EpiDeNetExporter",
     "LightweightCnnExporter",
+    "QLiteCnnExporter",
     "MIBMInetExporter",
     "SimpleMlpExporter",
     "ResNetExporter",
