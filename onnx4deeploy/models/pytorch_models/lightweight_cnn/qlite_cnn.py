@@ -39,7 +39,19 @@ class QLiteCNN(nn.Module):
             "weight_bit_width": 8,
             "bias_quant": Int32Bias,
             "input_quant": Int8ActPerTensorFloat,
-            "weight_quant":Int8WeightPerChannelFloat,
+            "weight_quant":Int8WeightPerChannelFloat, #no channel wise support in deeploy yet.
+            #"weight_quant":Int8WeightPerTensorFloat,
+            "output_quant": None,
+            "return_quant_tensor": True
+        }
+        
+        self.convAndLinQuantParamsOut = {
+            "bias": True,
+            "weight_bit_width": 8,
+            "bias_quant": Int32Bias,
+            "input_quant": Int8ActPerTensorFloat,
+            "weight_quant":Int8WeightPerChannelFloat,# no channel wise support in deeploy yet.
+            #"weight_quant": Int8WeightPerTensorFloat,
             "output_quant": Int8ActPerTensorFloat,
             "return_quant_tensor": True
         }
@@ -76,7 +88,7 @@ class QLiteCNN(nn.Module):
         self.relu4 = qnn.QuantReLU(bit_width=8, return_quant_tensor=True)
 
         self.fc = qnn.QuantLinear(self.fc_channels, num_classes,
-                                    **self.convAndLinQuantParams)  # Output: num_classes
+                                    **self.convAndLinQuantParamsOut)  # Output: num_classes
 
     def forward(self, x):
 

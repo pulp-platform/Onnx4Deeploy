@@ -348,10 +348,20 @@ class BaseONNXExporter(ABC):
             opset_version = self.config.get("opset_version", 12)
             onnx_model = self._export_to_onnx(model, input_tensor, opset_version)
         elif quant:
-            # load weights.
+            #load weights.
             state_dict = torch.load(os.path.join(os.getcwd(), self.config.get("weights_path", "model_weights.pth")), map_location="cpu")
             model.load_state_dict(state_dict, strict=False)
-            print("\n📤 Exporting to ONNX with quantization...")
+            # Temporary HACK because channelwise scales not supported.
+            # for name, param in model.named_parameters():
+            #     if param.requires_grad:
+            #         if "weight" in name or "bias" in name:
+            #             torch.nn.init.normal_(param, mean=0.0, std=0.02)
+            #         else:
+            #             # scales
+            #             torch.nn.init.uniform_(param, a=0.001, b = 0.03)
+                        
+            #         torch.nn.init.normal_(param, mean=0.0, std=0.02)
+            # print("\n📤 Exporting to ONNX with quantization...")
             # use DeepQuant to export to ONNX
             onnx_model = exportBrevitas(model, input_tensor, debug=False)
                     
@@ -510,12 +520,14 @@ class BaseONNXExporter(ABC):
 
         return self.paths["network"]
 
-    def export_zo_training(self, save_path: Optional[str] = None, quant: bool = False) -> str:
+    def export_zo_training(self, save_path: Optional[str] = None, noise_type: str = "gaussian", quant: bool = False) -> str:
         """
         Export model in zeroth-order training mode.
 
         Args:
-            save_path: Optional custom save path"""
+            save_path: Optional custom save path
+            noise_type: Type of noise to use for perturbation
+            quant: Whether to apply quantization """
         if save_path:
             self.save_path = save_path
 
@@ -548,9 +560,19 @@ class BaseONNXExporter(ABC):
             opset_version = self.config.get("opset_version", 12)
             onnx_model = self._export_to_onnx(model, input_tensor, opset_version)
         elif quant:
-            # load weights.
+            #load weights.
             state_dict = torch.load(os.path.join(os.getcwd(), self.config.get("weights_path", "model_weights.pth")), map_location="cpu")
             model.load_state_dict(state_dict, strict=False)
+            # Temporary HACK because channelwise scales not supported.
+            # for name, param in model.named_parameters():
+            #     if param.requires_grad:
+            #         if "weight" in name or "bias" in name:
+            #             torch.nn.init.normal_(param, mean=0.0, std=0.02)
+            #         else:
+            #             # scales
+            #             torch.nn.init.uniform_(param, a=0.001, b = 0.03)
+                        
+            #         torch.nn.init.normal_(param, mean=0.0, std=0.02)
             print("\n📤 Exporting to ONNX with quantization...")
             # use DeepQuant to export to ONNX
             onnx_model = exportBrevitas(model, input_tensor, debug=False)
@@ -591,17 +613,20 @@ class BaseONNXExporter(ABC):
         # Transform model for zeroth-order training (e.g., add noise nodes, modify outputs)
         print("\n🔧 Transforming model for zeroth-order training...")
         # Randomize initializers for testing
-        onnx_model = randomize_onnx_initializers(onnx_model)
+        if not quant:
+            onnx_model = randomize_onnx_initializers(onnx_model)
         generate_zo_graph(
             inference_onnx=self.paths["network_infer"],
             output_onnx=self.paths["network_zo_train"],
-            zo_config=self.config["zo"]
+            zo_config=self.config["zo"],
+            noise_type=noise_type,
         )
         
         generate_weight_update_graph(
             onnx_path=self.paths["network_infer"],
             output_path=self.paths["network_zo_update"],
-            zo_config=self.config["zo"])
+            zo_config=self.config["zo"],
+            noise_type=noise_type)
 
         # # Load training model and add gradient outputs
         # onnx_model = onnx.load(self.paths["network_train"])
@@ -634,7 +659,7 @@ class BaseONNXExporter(ABC):
 
         # Create test input/output
         print("\n🧪 Creating test input/output...")
-        self._create_test_data()
+        self._create_test_data(mode=ExportMode.ZO_TRAINING)
 
         # # Add optimizer (SGD) nodes
         # print("\n➕ Adding SGD optimizer nodes...")
@@ -645,7 +670,7 @@ class BaseONNXExporter(ABC):
         print(f"   Final model: {self.paths['network']}")
         print(f"{'='*60}\n")
 
-    def _create_test_data(self):
+    def _create_test_data(self, mode=ExportMode.INFERENCE):
         """
         Create test input/output data for training.
 
@@ -664,9 +689,9 @@ class BaseONNXExporter(ABC):
             # Create test input
             input_shape = self.get_input_shape()
             test_input = np.random.randn(*input_shape).astype(np.float32)
-
-            # Run ONNX inference to get output
             session = ort.InferenceSession(self.paths["network_infer"])
+            input_names = [i.name for i in session.get_inputs()]
+            
             input_name = session.get_inputs()[0].name
             test_output = session.run(None, {input_name: test_input})[0]
 
@@ -674,14 +699,19 @@ class BaseONNXExporter(ABC):
             save_path = Path(self.paths["output_dir"])
             save_path.mkdir(parents=True, exist_ok=True)
 
-            np.savez(save_path / "inputs.npz", input=test_input)
+            if mode == ExportMode.ZO_TRAINING:
+                test_label = np.random.randint(0, self.config["num_classes"], size=(input_shape[0],1)).astype(np.int8)
+                print(f"   Generated test labels with shape: {test_label.shape}")
+                np.savez(save_path / "inputs.npz", input=test_input, label=test_label)
+            else:
+                np.savez(save_path / "inputs.npz", input=test_input)
             np.savez(save_path / "outputs.npz", output=test_output)
 
             print("  ✅ Saved test data (ONNX reference):")
             print(f"     Input:  {save_path / 'inputs.npz'} shape={test_input.shape}")
             print(f"     Output: {save_path / 'outputs.npz'} shape={test_output.shape}")
         except Exception as e:
-            print(f"⚠️  Failed to create test data: {e}")
+            raise RuntimeError(f"Failed to create test data: {e}")
 
     def _add_optimizer_nodes(self):
         """

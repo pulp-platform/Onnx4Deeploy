@@ -82,7 +82,6 @@ class SleepConViTExporter(BaseONNXExporter):
             "zo": {
                 "epsilon": 0.1,
                 "seed": 42,
-                "noise_type": "uniform",
                 "exceptions": "node_matmul_2"
             }
         }

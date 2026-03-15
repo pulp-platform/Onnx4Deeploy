@@ -264,7 +264,7 @@ def generate_operator(operator_name: str, output_path: Optional[str] = None):
         sys.exit(1)
 
 
-def generate_model(model_name: str, mode: str, output_path: Optional[str] = None):
+def generate_model(model_name: str, mode: str, output_path: Optional[str] = None, noise_type: str = "gaussian"):
     """Generate model ONNX"""
     print(f"\n{'='*70}")
     print(f"🚀 Generating model: {model_name} ({mode.upper()} mode)")
@@ -315,10 +315,10 @@ def generate_model(model_name: str, mode: str, output_path: Optional[str] = None
             onnx_file = exporter.export_training()
             mode_desc = "Training mode"
         elif mode == "zo-train":
-            onnx_file = exporter.export_zo_training()
+            onnx_file = exporter.export_zo_training(noise_type=noise_type)
             mode_desc = "Zeroth-order Training mode"
         elif mode == "q-zo-train":
-            onnx_file = exporter.export_zo_training(quant=True)
+            onnx_file = exporter.export_zo_training(noise_type=noise_type, quant=True)
             mode_desc = "Quantized Zeroth-order Training mode"
         else:
             print(f"❌ Unknown mode: {mode}")
@@ -456,7 +456,8 @@ Examples:
 
     # Other options
     parser.add_argument("--examples", action="store_true", help="Show usage examples")
-
+    parser.add_argument("--noise-type", type=str, choices=["gaussian", "uniform", "triangle", "rademacher", "eggroll"], 
+                        default="gaussian", help="Noise type for perturbation operators [default: gaussian]")
     # Parse arguments
     args = parser.parse_args()
 
@@ -499,7 +500,7 @@ Examples:
     if args.operator:
         generate_operator(args.operator, args.output)
     elif args.model:
-        generate_model(args.model, args.mode, args.output)
+        generate_model(args.model, args.mode, args.output, args.noise_type)
 
 
 if __name__ == "__main__":

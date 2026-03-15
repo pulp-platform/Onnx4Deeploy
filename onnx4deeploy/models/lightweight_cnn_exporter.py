@@ -51,8 +51,7 @@ class LightweightCnnExporter(BaseONNXExporter):
             "custom_trainable_params": [],
             "zo": {
                 "epsilon": 0.1,
-                "seed": 42,
-                "noise_type": "rademacher",
+                "seed": 42
             }
         }
 

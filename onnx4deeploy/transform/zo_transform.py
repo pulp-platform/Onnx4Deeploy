@@ -10,10 +10,10 @@ from onnx import TensorProto, helper, shape_inference
 
 from onnx4deeploy.transform.model_transform import ensure_all_tensor_shapes
 
-def generate_zo_graph(inference_onnx:str, output_onnx:str, zo_config:dict) -> None:
+def generate_zo_graph(inference_onnx:str, output_onnx:str, zo_config:dict, noise_type: str) -> None:
     """ Generate MeZO ONNX graph for model based on its inference onnx"""
 
-    epsilon, seed, noise_type, exceptions = zo_config["epsilon"], zo_config["seed"], zo_config["noise_type"], zo_config.get("exceptions", [])
+    epsilon, seed, exceptions = zo_config["epsilon"], zo_config["seed"], zo_config.get("exceptions", [])
 
     base_path = os.path.dirname(output_onnx)
     os.makedirs(base_path, exist_ok=True)
@@ -27,15 +27,16 @@ def generate_zo_graph(inference_onnx:str, output_onnx:str, zo_config:dict) -> No
     ensure_all_tensor_shapes(model_path=output_onnx, output_path=output_onnx)
     append_cross_entropy_loss(output_onnx, output_onnx, label_name='label')
 
-def generate_weight_update_graph(onnx_path: str, output_path: str, zo_config: dict) -> None:
+def generate_weight_update_graph(onnx_path: str, output_path: str, zo_config: dict, noise_type: str) -> None:
     """
     Generates a weight update ONNX graph: for each weight/bias, creates a perturbation node
     that updates the initializer in-place. No inputs, no outputs, just perturbation nodes.
     """
-    epsilon, seed, noise_type, exceptions = zo_config["epsilon"], zo_config["seed"], zo_config["noise_type"], zo_config.get("exceptions", [])
+    epsilon, seed, exceptions = zo_config["epsilon"], zo_config["seed"], zo_config.get("exceptions", [])
 
     model = onnx.load(onnx_path)
     initializers = [init for init in model.graph.initializer if ("weight" in init.name or "bias" in init.name) and init.name not in exceptions]
+    new_initializers = list(initializers)  # Start with the original initializers and add new ones as needed
     nodes = []
     perturbation_counter = 0
 
@@ -53,6 +54,9 @@ def generate_weight_update_graph(onnx_path: str, output_path: str, zo_config: di
                 idx=perturbation_counter,
                 doc_string="y = x + epsilon * RandomNormal(x, seed)"
             )
+            nodes.append(node)
+            perturbation_counter += 1
+
         elif noise_type == "uniform":
             node = helper.make_node(
                 "PerturbUniform",
@@ -67,13 +71,16 @@ def generate_weight_update_graph(onnx_path: str, output_path: str, zo_config: di
                 high=np.sqrt(3),
                 doc_string="y = x + epsilon * RandomUniform(x, seed)"
             )
+            nodes.append(node)
+            perturbation_counter += 1
+
         elif noise_type == "eggroll":
             # Shape annotation for intermediate outputs
-              # Prepare shapes for eggroll perturbation
-            noise_shape = [int(x) for x in init.dims]
+            # Prepare shapes for eggroll perturbation
+            noise_shape = list(onnx.numpy_helper.to_array(init).shape)
             a_shape = [noise_shape[0], 1]
             b_shape = [int(np.prod(noise_shape[1:])), 1]
-
+            print(F"noise_shape: {noise_shape}, a_shape: {a_shape}, b_shape: {b_shape}")
             # Create shape initializers
             shape_a_tensor = helper.make_tensor(
                 name=f"shape_a_{init.name}", data_type=TensorProto.INT64, dims=[len(a_shape)],
@@ -113,13 +120,13 @@ def generate_weight_update_graph(onnx_path: str, output_path: str, zo_config: di
                 )
                 nodes.append(unflatten_node)
                 # Add flat shape initializer
-                initializers.extend([shape_flat_tensor])
+                new_initializers.append([shape_flat_tensor])
             else:
                 eggroll_input = init.name
                 eggroll_output = f"{init.name}_perturbed"
 
             # Add shape initializers
-            initializers.extend([shape_a_tensor, shape_b_tensor, shape_input_tensor])
+            new_initializers.extend([shape_a_tensor, shape_b_tensor, shape_input_tensor])
 
             # Eggroll noise nodes
             noise_node_a = helper.make_node(
@@ -156,7 +163,8 @@ def generate_weight_update_graph(onnx_path: str, output_path: str, zo_config: di
             )
 
             nodes.extend([noise_node_a, noise_node_b, gemm_node])
-            
+            perturbation_counter += 2
+
         elif noise_type == "rademacher":
             node = helper.make_node(
                 "PerturbRademacher",
@@ -169,11 +177,11 @@ def generate_weight_update_graph(onnx_path: str, output_path: str, zo_config: di
                 eps=epsilon,
                 doc_string="y = x + epsilon * RandomRademacher(x, seed)"
             )
-        # Add other noise types as needed...
+            nodes.append(node)
+            perturbation_counter += 1
+
         else:
             raise ValueError(f"Unsupported noise_type: {noise_type}")
-        nodes.append(node)
-        perturbation_counter += 1
 
     # Build a minimal graph: no inputs, no outputs, just initializers and nodes
     graph = helper.make_graph(
@@ -555,23 +563,26 @@ def append_cross_entropy_loss(onnx_path, output_path, label_name='y', logits_out
                 batch_dim = first_dim.dim_param
 
     # add the new label input using resolved batch_dim
-    label_vi = helper.make_tensor_value_info(label_input_name, TensorProto.INT8, [batch_dim])
+    label_vi = helper.make_tensor_value_info(label_input_name, TensorProto.INT64, [batch_dim, 1])
     graph.input.append(label_vi)
 
     # create loss node (standard SoftmaxCrossEntropyLoss) with proper attribute
-    loss_name = "loss"
+    logprob = "log_prob"
     loss_node = helper.make_node(
         "SoftmaxCrossEntropyLoss",
         inputs=[logits_name, label_input_name],
-        outputs=[loss_name],
+        outputs=[logprob],
         name="CrossEntropyLoss",
         reduction=reduction,
     )
     graph.node.append(loss_node)
 
-    # replace graph outputs with the scalar loss
+    # replace graph outputs with the log prob
+    output_shape = [d.dim_value if d.HasField("dim_value") else d.dim_param 
+                    for d in graph.output[0].type.tensor_type.shape.dim]
+    
     del graph.output[:]
-    graph.output.append(helper.make_tensor_value_info(loss_name, TensorProto.FLOAT, []))
+    graph.output.append(helper.make_tensor_value_info(logprob, TensorProto.FLOAT, output_shape))
 
     # try to infer shapes and save
     try:

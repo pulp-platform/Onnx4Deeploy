@@ -10,8 +10,10 @@ from typing import Any, Dict, List, Tuple
 import numpy as np
 import torch
 import torch.onnx.utils
+from brevitas.quant_tensor import QuantTensor
 
 from DeepQuant.ExportBrevitas import exportBrevitas
+
 
 from ..core.base_exporter import BaseONNXExporter
 
@@ -59,8 +61,7 @@ class QLiteCnnExporter(BaseONNXExporter):
             "custom_trainable_params": [],
             "zo": {
                 "epsilon": 0.1,
-                "seed": 42,
-                "noise_type": "eggroll",
+                "seed": 42
             },
             "weights_path":"onnx4deeploy/models/pytorch_models/lightweight_cnn/qlite_cnn.pth"
         }
@@ -177,6 +178,8 @@ class QLiteCnnExporter(BaseONNXExporter):
         with torch.no_grad():
             input_tensor = torch.from_numpy(test_input)
             output_tensor = model(input_tensor)
+            if isinstance(output_tensor, QuantTensor):
+                output_tensor = output_tensor.value
             test_output = output_tensor.numpy()
 
         # Restore training mode if needed
@@ -219,9 +222,10 @@ class QLiteCnnExporter(BaseONNXExporter):
                     w_scale = brevitas_scales.get(f"{layer_name}.weight_quant")
                     out_scale = brevitas_scales.get(f"{layer_name}.output_quant")
 
+
                     if in_scale is not None and w_scale is not None and out_scale is not None:
                         # Conv accumulation scale = input_scale * weight_scale
-                        # Flatten to support Brevitas per-channel deeply nested precision lists
+
                         w_flat = np.array(w_scale).flatten()
                         src_scale = in_scale * w_flat
 
