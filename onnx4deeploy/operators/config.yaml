@@ -13,6 +13,12 @@ perturbrademacher:
 perturbeggroll:
   input_shape: [128, 48]
 
+rqsperturbrademacher:
+  input_shape: [128, 48]
+
+rqsperturbuniform:
+  input_shape: [128, 48]
+
 conv2d:
   input_shape: [1, 1, 28, 28]
   kernel_size: 5

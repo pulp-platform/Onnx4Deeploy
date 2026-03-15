@@ -13,7 +13,7 @@ from onnx import TensorProto, helper
 from .base_operator import BaseOperatorTest
 
 
-class PerturbRademacherOperatorTest(BaseOperatorTest):
+class RQSPerturbRademacherOperatorTest(BaseOperatorTest):
     """Test generator for ONNX PerturbRademacher operator (custom/training op)."""
 
     def __init__(self, config_path=None, save_path=None):
@@ -36,13 +36,26 @@ class PerturbRademacherOperatorTest(BaseOperatorTest):
     
     def generate_inputs(self) -> np.ndarray:
         """Generate input with both positive and negative values."""
-        return {"x": np.random.randn(*self.input_shape).astype(np.float32)}
+        x = np.random.randn(*self.input_shape).astype(np.float32)
+        # quantize:
+        max_val = np.max(np.abs(x), axis=1)
+        s = max_val / 127.0
+        s[s == 0] = 1.0 # Avoid division by zero
+        mul = np.round(0.01 / s * (2**15)).astype(np.int32)  # quantized multiplier for perturbation
+        x_quantized = np.round(x / s[:, np.newaxis]) * s[:, np.newaxis]
+        return {"x": x_quantized.astype(np.float32), "mul": mul.astype(np.float32)}
     
     def create_onnx_graph(self, inputs: Dict[str, np.ndarray]):
         """Create ONNX graph for PerturbRademacher operator."""
         # Input tensors (without loss_grad for the final model)
         x_tensor = helper.make_tensor_value_info(
             "x", TensorProto.FLOAT, self.input_shape
+        )
+        mul_initializer = helper.make_tensor(
+            name="mul",
+            data_type=TensorProto.FLOAT,
+            dims=(self.input_shape[0],1),
+            vals=inputs["mul"],
         )
         # Output tensor
         perturbed_x_tensor = helper.make_tensor_value_info(
@@ -51,13 +64,15 @@ class PerturbRademacherOperatorTest(BaseOperatorTest):
 
         # PerturbRademacher node (without loss_grad input)
         perturb_node = helper.make_node(
-            "PerturbRademacher",
-            inputs=["x"],
+            "RQSPerturbRademacher",
+            inputs=["x", "mul"],
             outputs=["perturbed_x"],
             seed=42,
-            eps=0.01,
             idx=0,
-            name="perturb_rademacher_node",
+            div=2**15,
+            n_levels=256,
+            signed=1,
+            name="rqs_perturb_rademacher_node",
             domain="com.microsoft"
         )
 
@@ -67,6 +82,7 @@ class PerturbRademacherOperatorTest(BaseOperatorTest):
             "perturb_rademacher_graph",
             [x_tensor],
             [perturbed_x_tensor],
+            [mul_initializer]
         )
 
         return graph
@@ -83,13 +99,14 @@ class PerturbRademacherOperatorTest(BaseOperatorTest):
         )
 
         return model
-    
+
     def run_inference(self, onnx_file: str, inputs: Dict[str, np.ndarray]) -> Dict[str, np.ndarray]:
         """
         Run inference using custom emulation
         """
         # perturbation is built from -1's and 1's
-        perturbation = np.random.choice([-1, 1], size=self.input_shape).astype(np.float32)
+        perturbation = np.random.choice([-1, 1], size=self.input_shape).astype(np.int8)
+        perturbation = perturbation * inputs["mul"].reshape(-1, 1) // 2 ** 15
         perturbed_x = inputs["x"] + perturbation
         
         return {"perturbed_x": perturbed_x}

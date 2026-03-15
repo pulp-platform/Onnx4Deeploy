@@ -78,5 +78,7 @@ __all__ = [
     "PerturbEggrollOperatorTest",
     "PerturbRademacherOperatorTest",
     "PerturbUniformOperatorTest",
-    "PerturbTriangleOperatorTest"
+    "PerturbTriangleOperatorTest",
+    "RQSPerturbRademacherOperatorTest",
+    "RQSPerturbUniformOperatorTest",
 ]

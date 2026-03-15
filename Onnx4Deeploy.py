@@ -183,6 +183,8 @@ def list_available_operators():
         "PerturbTriangle": "Perturb input with triangle random noise",
         "PerturbRademacher": "Perturb input with Rademacher random noise",
         "PerturbEggroll": "Perturb input with Eggroll random noise",
+        "RQSPerturbrademacher": "Perturb input with quantized Rademacher random noise",
+        "RQSPerturbUniform": "Perturb input with quantized Uniform random noise",
         
         # Others
         "ReduceSum": "Sum reduction",
