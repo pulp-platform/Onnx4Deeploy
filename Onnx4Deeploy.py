@@ -42,6 +42,7 @@ def list_available_models():
         ResNetExporter,
         SimpleMlpExporter,
         SleepConViTExporter,
+        QSleepConViTExporter
     )
 
     models = {
@@ -147,6 +148,12 @@ def list_available_models():
             "input_shape": "(B, 1, 28, 28)",
             "classes": 10,
         },
+        "QSleepConViT": {
+            "class": QSleepConViTExporter,
+            "description": "QLite SleepConViT (Quantized Vision Transformer for Sleep Stage Classification)",
+            "input_shape": "(B, 1, 3000)",
+            "classes": 5
+        }
     }
     return models
 
@@ -458,7 +465,7 @@ Examples:
 
     # Other options
     parser.add_argument("--examples", action="store_true", help="Show usage examples")
-    parser.add_argument("--noise-type", type=str, choices=["gaussian", "uniform", "triangle", "rademacher", "eggroll"], 
+    parser.add_argument("--noise-type", type=str, choices=["gaussian", "uniform", "triangle", "rademacher", "eggroll", "rqs_rademacher", "rqs_uniform"], 
                         default="gaussian", help="Noise type for perturbation operators [default: gaussian]")
     # Parse arguments
     args = parser.parse_args()

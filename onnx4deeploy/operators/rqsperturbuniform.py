@@ -32,7 +32,6 @@ class RQSPerturbUniformOperatorTest(BaseOperatorTest):
         pn_config = config.get("perturbuniform", {})
         self.input_shape = tuple(pn_config["input_shape"])
         return config
-
     
     def generate_inputs(self) -> np.ndarray:
         """Generate input with both positive and negative values."""
@@ -42,8 +41,8 @@ class RQSPerturbUniformOperatorTest(BaseOperatorTest):
         s = max_val / 127.0
         s[s == 0] = 1.0 # Avoid division by zero
         mul = np.round(0.01*np.sqrt(3) / s * (2**15)).astype(np.int32)  # quantized multiplier for perturbation
-        x_quantized = np.round(x / s[:, np.newaxis]) * s[:, np.newaxis]
-        return {"x": x_quantized.astype(np.float32), "mul": mul.astype(np.float32)}
+        x_quantized = np.round(x / s[:, np.newaxis])
+        return {"x": x_quantized.astype(np.int32), "mul": mul.astype(np.int32)}
     
     def create_onnx_graph(self, inputs: Dict[str, np.ndarray]):
         """Create ONNX graph for PerturbUniform operator."""
@@ -54,7 +53,7 @@ class RQSPerturbUniformOperatorTest(BaseOperatorTest):
         mul_initializer = helper.make_tensor(
             name="mul",
             data_type=TensorProto.FLOAT,
-            dims=(self.input_shape[0],1),
+            dims=[self.input_shape[0]],
             vals=inputs["mul"],
         )
         # Output tensor

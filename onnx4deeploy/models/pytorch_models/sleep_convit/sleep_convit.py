@@ -137,7 +137,6 @@ class ConvStem(nn.Module):
 
     This module applies two parallel convolutional branches with different kernel sizes
     to capture multi-scale temporal features, then concatenates the results.
-    Simplified to 2 branches for better Deeploy compatibility.
     Uses Conv2d for better compatibility with ONNX Runtime transformer optimizer.
 
     Args:
@@ -353,7 +352,7 @@ class SleepConViT(nn.Module):
         self.conv_stem = ConvStem(
             in_channels=1,
             out_channels=self.model_dim,
-            kernel_sizes=(25, 200, 100),  # 2 branches: fine-grained (25) and coarse-grained (100)
+            kernel_sizes=(25, 200, 100),  # 3 branches with different kernel sizes
             stride=4,
         )
 

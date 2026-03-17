@@ -351,20 +351,10 @@ class BaseONNXExporter(ABC):
             #load weights.
             state_dict = torch.load(os.path.join(os.getcwd(), self.config.get("weights_path", "model_weights.pth")), map_location="cpu")
             model.load_state_dict(state_dict, strict=False)
-            # Temporary HACK because channelwise scales not supported.
-            # for name, param in model.named_parameters():
-            #     if param.requires_grad:
-            #         if "weight" in name or "bias" in name:
-            #             torch.nn.init.normal_(param, mean=0.0, std=0.02)
-            #         else:
-            #             # scales
-            #             torch.nn.init.uniform_(param, a=0.001, b = 0.03)
-                        
-            #         torch.nn.init.normal_(param, mean=0.0, std=0.02)
-            # print("\n📤 Exporting to ONNX with quantization...")
-            # use DeepQuant to export to ONNX
             onnx_model = exportBrevitas(model, input_tensor, debug=False)
-                    
+            for name, param in model.named_parameters():
+                if param.requires_grad and "weight" in name and "conv" in name:
+                    torch.nn.init.normal_(param, mean=0.0, std=0.02)
         # Save
         onnx.save(onnx_model, self.paths["network"])
         print(f"✅ ONNX model saved: {self.paths['network']}")
@@ -563,16 +553,6 @@ class BaseONNXExporter(ABC):
             #load weights.
             state_dict = torch.load(os.path.join(os.getcwd(), self.config.get("weights_path", "model_weights.pth")), map_location="cpu")
             model.load_state_dict(state_dict, strict=False)
-            # Temporary HACK because channelwise scales not supported.
-            # for name, param in model.named_parameters():
-            #     if param.requires_grad:
-            #         if "weight" in name or "bias" in name:
-            #             torch.nn.init.normal_(param, mean=0.0, std=0.02)
-            #         else:
-            #             # scales
-            #             torch.nn.init.uniform_(param, a=0.001, b = 0.03)
-                        
-            #         torch.nn.init.normal_(param, mean=0.0, std=0.02)
             print("\n📤 Exporting to ONNX with quantization...")
             # use DeepQuant to export to ONNX
             onnx_model = exportBrevitas(model, input_tensor, debug=False)
@@ -670,7 +650,7 @@ class BaseONNXExporter(ABC):
         print(f"   Final model: {self.paths['network']}")
         print(f"{'='*60}\n")
 
-    def _create_test_data(self, mode=ExportMode.INFERENCE):
+    def _create_test_data(self, mode=ExportMode.INFERENCE, quant=False):
         """
         Create test input/output data for training.
 
@@ -689,7 +669,14 @@ class BaseONNXExporter(ABC):
             # Create test input
             input_shape = self.get_input_shape()
             test_input = np.random.randn(*input_shape).astype(np.float32)
-            session = ort.InferenceSession(self.paths["network_infer"])
+            from onnxruntime_extensions import onnx_op, PyOp, get_library_path
+            from DeepQuant.QuantDequantOnnx import requant_shift_onnx
+            sess_options = ort.SessionOptions()
+        
+            sess_options.register_custom_ops_library(get_library_path()) 
+
+            session = ort.InferenceSession(self.paths["network_infer"],
+                                           sess_options=sess_options)
             input_names = [i.name for i in session.get_inputs()]
             
             input_name = session.get_inputs()[0].name

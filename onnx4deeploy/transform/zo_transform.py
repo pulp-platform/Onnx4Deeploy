@@ -9,6 +9,7 @@ from pathlib import Path
 from onnx import TensorProto, helper, shape_inference
 
 from onnx4deeploy.transform.model_transform import ensure_all_tensor_shapes
+from DeepQuant.QuantDequantOnnx import Quant, Dequant, RequantShift
 
 def generate_zo_graph(inference_onnx:str, output_onnx:str, zo_config:dict, noise_type: str) -> None:
     """ Generate MeZO ONNX graph for model based on its inference onnx"""
@@ -180,6 +181,75 @@ def generate_weight_update_graph(onnx_path: str, output_path: str, zo_config: di
             nodes.append(node)
             perturbation_counter += 1
 
+        elif noise_type == "rqs_rademacher":        
+            # compute mul factor from scale.
+            scale = np.max(np.abs(onnx.numpy_helper.to_array(init)), axis=tuple(range(1, len(init.dims))), keepdims=True)
+            epsilon = 0.01
+            # Use different scaling for weights (8-bit) and biases (32-bit)
+            if '_add' in init.name:
+                quant_max = 2**31 - 1
+                mul = np.round(epsilon / (scale / quant_max) * (2**31)).astype(np.int32)  # quantized multiplier for perturbation
+
+            else:
+                quant_max = 127
+                mul = np.round(epsilon / (scale / quant_max) * (2**15)).astype(np.int64)  # quantized multiplier for perturbation
+            init_mul = helper.make_tensor(
+                name=f"{init.name}_mul",
+                data_type=TensorProto.FLOAT,
+                dims=[mul.shape[0]],
+                vals=mul
+            )
+            node = helper.make_node(
+                "RQSPerturbRademacher",
+                inputs=[init.name, f"{init.name}_mul"],
+                outputs=[perturbed_name],
+                name=f"rqs_perturb_rademacher_{perturbed_name}",
+                domain="mezo",
+                idx=perturbation_counter,
+                seed=seed,
+                signed=1,
+                div=2**15,
+                n_levels=256,
+                doc_string="y = x + epsilon * RQSRandomRademacher(x, seed)"
+            )
+            nodes.append(node)
+            new_initializers.append(init_mul)
+            perturbation_counter += 1
+            
+        elif noise_type == "rqs_uniform":
+            
+             # compute mul factor from scale.
+            scale = np.max(np.abs(onnx.numpy_helper.to_array(init)), axis=tuple(range(1, len(init.dims))), keepdims=True)
+            epsilon = 0.01
+            # Use different scaling for weights (8-bit) and biases (32-bit)
+            if '_add' in init.name:
+                quant_max = 2**31 - 1
+            else:
+                quant_max = 127.0
+            mul = np.round(epsilon / (scale / quant_max) * (2**15)).astype(np.int32) 
+            init_mul = helper.make_tensor(
+                name=f"{init.name}_mul",
+                data_type=TensorProto.FLOAT,
+                dims=mul.shape,
+                vals=mul
+            )
+            
+            node = helper.make_node(
+                "RQSPerturbUniform",
+                inputs=[init.name, f"{init.name}_mul"],
+                outputs=[perturbed_name],
+                name=f"rqs_perturb_uniform_{perturbed_name}",
+                domain="mezo",
+                seed=seed,
+                idx=perturbation_counter,
+                signed=1,
+                div=2**15,
+                n_levels=256,
+                doc_string="y = x + epsilon * RQSRandomUniform(x, seed)"
+            )
+            nodes.append(node)
+            new_initializers.append(init_mul)
+            perturbation_counter += 1
         else:
             raise ValueError(f"Unsupported noise_type: {noise_type}")
 
@@ -253,19 +323,26 @@ def inject_perturbation_nodes(
 
         base_seed = int(seed)
         perturbation_counter = 0
-
+        epsilon=0.01
         # Prepare a fast lookup for initializer names
         initializer_names = {init.name for init in new_initializers}
+        
+        print(f"all initializer names: {initializer_names}")
 
         for node in original_model.graph.node:
             # Check if this is a node we want to modify
-            if node.op_type in ["Conv", "Gemm", "MatMul"] and node.name not in exceptions:
+            if node.op_type in ["Conv", "Gemm", "MatMul", "RequantShift"] and node.name not in exceptions:
                 print(F"node: {node.name}, op_type: {node.op_type}")
                 modified_inputs = list(node.input)
                 made_change = False
 
                 for i, input_name in enumerate(node.input):
                     # Check if the input is a weight/bias initializer
+                    
+                    # For RequantShift, only perturb the 3rd input (the 'add' term/bias).
+                    if node.op_type == "RequantShift" and i != 2:
+                        continue
+                    
                     if input_name in initializer_names:
                         made_change = True
 
@@ -297,6 +374,7 @@ def inject_perturbation_nodes(
                                 doc_string="y = x + epsilon * RandomNormal(x, seed)"
                             )
                             new_nodes.append(perturbation_node)
+                            perturbation_counter += 1
 
                         elif noise_type == "uniform":
                             perturbation_node = helper.make_node(
@@ -307,13 +385,14 @@ def inject_perturbation_nodes(
                                 domain="mezo",
                                 idx=perturbation_counter,
                                 seed=seed,
-                                eps=epsilon,
+                                eps=epsilon*2*np.sqrt(3),
                                 low=-np.sqrt(3),
                                 high=np.sqrt(3),
                                 # dtype=dtype,
                                 doc_string="y = x + epsilon * RandomUniform(x, seed)"
                             )
                             new_nodes.append(perturbation_node)
+                            perturbation_counter += 1
 
                         elif noise_type == "triangle":
                             perturbation_node = helper.make_node(
@@ -324,13 +403,14 @@ def inject_perturbation_nodes(
                                 domain="mezo",
                                 idx=perturbation_counter,
                                 seed=seed,
-                                eps=epsilon,
+                                eps=epsilon*2*np.sqrt(6),
                                 low=-np.sqrt(6),
                                 high=np.sqrt(6),
                                 # dtype=dtype,
                                 doc_string="y = x + epsilon * RandomTriangle(x, seed)"
                             )
                             new_nodes.append(perturbation_node)
+                            perturbation_counter += 1
 
                         elif noise_type == "rademacher":
                             perturbation_node = helper.make_node(
@@ -346,6 +426,116 @@ def inject_perturbation_nodes(
                                 doc_string="y = x + epsilon * RandomRademacher(x, seed)"
                             )
                             new_nodes.append(perturbation_node)
+                            perturbation_counter += 1
+
+                        elif noise_type == "rqs_rademacher":
+                            scale = np.max(np.abs(onnx.numpy_helper.to_array(original_weight_tensor)), 
+                                           axis=tuple(range(1, len(original_weight_tensor.dims))), keepdims=True)
+                            epsilon = 0.01
+                            # compute mul factor from scale. input 1 is normally the weight tensor.
+                            if '_add' in input_name:
+                                print(F"found add in name: {input_name}, treating as bias with 32-bit quantization")
+                                quant_max = 2**31 - 1
+                                # For biases, inherit the 'div' from the RequantShift node itself
+                                print(F"NOde: {node.name}, op_type: {node.op_type}, attributes: {node.attribute}")
+                                # CORRECT: 'div' is a TENSOR attribute, not an INT attribute.
+                                div_tensor_proto = next((attr.t for attr in node.attribute if attr.name == 'div'), None)
+                                if div_tensor_proto is None:
+                                    raise ValueError(f"Could not find 'div' TENSOR attribute on RequantShift node: {node.name}")
+                                
+                                # Convert the TensorProto to a numpy array and get the scalar value.
+                                producer_div = onnx.numpy_helper.to_array(div_tensor_proto).item()
+                                producer_mul_tensor = None
+                                if len(node.input) > 1:
+                                    mul_input_name = node.input[1]
+                                    producer_mul_tensor = next((init for init in new_initializers if init.name == mul_input_name), None)
+                                if producer_div is None:
+                                    raise ValueError(f"Could not find 'div' attribute on RequantShift node: {node.name}")
+                                print(F"producer_div: {producer_div}, producer_mul: {producer_mul_tensor}")
+
+                                div=producer_div
+                                n_levels = 2**32
+                                producer_mul = onnx.numpy_helper.to_array(producer_mul_tensor)
+
+                                mul = np.round(epsilon *producer_mul).astype(np.int32)  # quantized multiplier for perturbation
+
+                            else:
+                                quant_max = 127
+                                div = 2**15
+                                n_levels = 2**8
+                                mul = np.round(epsilon / (scale / quant_max) * (div)).astype(np.int64)
+                            init_mul = helper.make_tensor(
+                                name=f"{input_name}_mul",
+                                data_type=TensorProto.FLOAT,
+                                dims=[mul.shape[0]],
+                                vals=mul if mul.ndim > 0 else mul
+                            )
+                            new_initializers.append(init_mul)
+
+                            perturbation_node = helper.make_node(
+                                "RQSPerturbRademacher",
+                                inputs=[input_name, f"{input_name}_mul"],
+                                outputs=[perturbed_tensor_name],
+                                name=f"rqs_perturb_rademacher_{perturbed_tensor_name}",
+                                domain="mezo",
+                                idx=perturbation_counter,
+                                seed=seed,
+                                signed=1,
+                                div=div,
+                                n_levels=n_levels,
+                                doc_string="y = x + epsilon * RQSRandomRademacher(x, seed)"
+                            )
+                            new_nodes.append(perturbation_node)
+                            perturbation_counter += 1
+                            
+                        elif noise_type == "rqs_uniform":
+                            scale = np.max(np.abs(onnx.numpy_helper.to_array(original_weight_tensor)), 
+                                            axis=tuple(range(1, len(original_weight_tensor.dims))), keepdims=True)
+                            # compute mul factor from scale. input 1 is normally the weight tensor.
+                            if '_add' in input_name:
+                                quant_max = 2**31 - 1
+                                producer_div = next((attr.i for attr in node.attribute if attr.name == 'div'), None)
+                                if producer_div is None:
+                                    raise ValueError(f"Could not find 'div' attribute on RequantShift node: {node.name}")
+                                div = producer_div
+                                n_levels = 2**8
+                                mul = np.round(epsilon / (scale / quant_max) * (2**31)).astype(np.int32)  # quantized multiplier for perturbation
+
+                            else:
+                                quant_max = 127
+                                div = 2**15
+                                n_levels = 2**8
+                                mul = np.round(epsilon / (scale / quant_max) * (2**15)).astype(np.int64)  # quantized multiplier for perturbation
+                            init_mul = helper.make_tensor(
+                                name=f"{input_name}_mul",
+                                data_type=TensorProto.FLOAT,
+                                dims=mul.shape,
+                                vals=mul
+                            )
+                            init_mul = helper.make_tensor(
+                                name=f"{input_name}_mul",
+                                data_type=TensorProto.FLOAT,
+                                dims=mul.shape,
+                                vals=mul
+                            )
+                            new_initializers.append(init_mul)
+
+                            perturbation_node = helper.make_node(
+                                "RQSPerturbUniform",
+                                inputs=[input_name, f"{input_name}_mul"],
+                                outputs=[perturbed_tensor_name],
+                                name=f"rqs_perturb_uniform_{perturbed_tensor_name}",
+                                domain="mezo",
+                                seed=seed,
+                                idx=perturbation_counter,
+                                signed=1,
+                                div=div,
+                                n_levels=n_levels,
+                                doc_string="y = x + epsilon * RQSRandomUniform(x, seed)"
+                            )
+                            new_nodes.append(perturbation_node)
+                            perturbation_counter += 1
+
 
                         elif noise_type == "eggroll":
                             # Shape annotation for intermediate outputs
@@ -444,6 +634,9 @@ def inject_perturbation_nodes(
                             new_nodes.append(noise_node_a)
                             new_nodes.append(noise_node_b)
                             new_nodes.append(gemm_node)
+                        
+                        else:
+                            raise ValueError(f"Unsupported noise_type: {noise_type}")
 
                         # **CRITICAL**: annotate perturbed edge with same dtype/shape as weight
                         if len(original_weight_tensor.dims) == 1:
@@ -508,8 +701,10 @@ def inject_perturbation_nodes(
             # Add the standard opset with the version we found
             helper.make_opsetid("", standard_opset_version),
 
-            # Addcustom domain
-            helper.make_opsetid("mezo", 1)
+            # Addcustom domains
+            helper.make_opsetid("mezo", 1),
+            helper.make_opsetid("ai.onnx.contrib", 1),
+            helper.make_opsetid("com.microsoft", 1)
         ]
         new_model = helper.make_model(new_graph, producer_name="mezo-graph-generator",
                     opset_imports=opset_list)

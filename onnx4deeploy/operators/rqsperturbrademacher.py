@@ -33,7 +33,6 @@ class RQSPerturbRademacherOperatorTest(BaseOperatorTest):
         self.input_shape = tuple(pn_config["input_shape"])
         return config
 
-    
     def generate_inputs(self) -> np.ndarray:
         """Generate input with both positive and negative values."""
         x = np.random.randn(*self.input_shape).astype(np.float32)
@@ -42,7 +41,7 @@ class RQSPerturbRademacherOperatorTest(BaseOperatorTest):
         s = max_val / 127.0
         s[s == 0] = 1.0 # Avoid division by zero
         mul = np.round(0.01 / s * (2**15)).astype(np.int32)  # quantized multiplier for perturbation
-        x_quantized = np.round(x / s[:, np.newaxis]) * s[:, np.newaxis]
+        x_quantized = np.round(x / s[:, np.newaxis])
         return {"x": x_quantized.astype(np.float32), "mul": mul.astype(np.float32)}
     
     def create_onnx_graph(self, inputs: Dict[str, np.ndarray]):
@@ -54,7 +53,7 @@ class RQSPerturbRademacherOperatorTest(BaseOperatorTest):
         mul_initializer = helper.make_tensor(
             name="mul",
             data_type=TensorProto.FLOAT,
-            dims=(self.input_shape[0],1),
+            dims=[self.input_shape[0]],
             vals=inputs["mul"],
         )
         # Output tensor

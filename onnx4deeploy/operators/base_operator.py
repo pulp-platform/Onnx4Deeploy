@@ -231,7 +231,7 @@ class BaseOperatorTest(ABC):
 
         # Generate inputs
         inputs = self.generate_inputs()
-
+        print(F"inputs: {inputs}")
         # Create ONNX graph
         graph = self.create_onnx_graph(inputs)
 

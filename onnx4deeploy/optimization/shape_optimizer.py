@@ -551,11 +551,27 @@ def register_custom_shape_inference():
             print(
                 f"  SoftmaxCrossEntropyGrad shape inference: output shape set from log_prob input"
             )
+            
+        def requantize_shift_shape_inference(ctx):
+            ctx.node
+            # Get first input
+            proto = ctx.get_input_type(0)
+            if proto is None:
+                return
+
+            # Output shape matches log_prob input shape
+            ctx.set_output_type(0, proto)
+            print(
+                f"  RequantShift shape inference: output shape set from first input"
+            )  
 
         # Register the custom shape inference function
         shape_calculator_dict = _get_shape_calculator_dict()
         shape_calculator_dict["com.microsoft.SoftmaxCrossEntropyGrad"] = (
             softmax_cross_entropy_grad_shape_inference
+        )
+        shape_calculator_dict["ai.onnx.contrib.RequantizeShift"] = (
+            requantize_shift_shape_inference
         )
         return True
     except (ImportError, AttributeError):
@@ -586,14 +602,17 @@ def infer_shapes_with_custom_ops(
     # Check for Microsoft custom ops
     op_types = set(node.op_type for node in model.graph.node)
     microsoft_ops = [op for op in op_types if "com.microsoft" in op]
+    ai_onnx_contrib_ops = [op for op in op_types if "ai.onnx.contrib" in op]
     if microsoft_ops:
         print(f"  Found Microsoft custom ops: {microsoft_ops}")
+    if ai_onnx_contrib_ops:
+        print(f"  Found ai.onnx.contrib ops: {ai_onnx_contrib_ops}")
 
     try:
         # Register custom shape inference for Microsoft ops (if available)
         registration_success = register_custom_shape_inference()
         if not registration_success:
-            print("  ℹ️  Custom op registration not available, using fallback for Microsoft ops")
+            print("  ℹ️  Custom op registration not available, using fallback for custom ops")
 
         # Try standard shape inference
         inferred_model = shape_inference.infer_shapes(model)
@@ -613,7 +632,7 @@ def infer_shapes_with_custom_ops(
             except Exception as node_err:
                 print(f"    Node {i}: {node.op_type} failed: {str(node_err)}")
                 # Try custom inference for Microsoft ops
-                if "com.microsoft" in node.op_type:
+                if "com.microsoft" in node.op_type or "ai.onnx.contrib" in node.op_type:
                     print(f"    Applying custom inference for: {node.op_type}")
                     try:
                         apply_custom_inference(inferred_model.graph, node)
@@ -655,6 +674,13 @@ def apply_custom_inference(graph: onnx.GraphProto, node: onnx.NodeProto) -> None
                     set_tensor_shape(graph, node.output[0], input_shape)
                     print(f"    {node.op_type} output shape: {input_shape}")
 
+    elif "ai.onnx.contrib.RequantizeShift" in node.op_type:
+        # RequantizeShift output shape matches first input
+        if len(node.input) >= 1 and len(node.output) >= 1:
+            input_shape = get_tensor_shape(graph, node.input[0])
+            if input_shape:
+                set_tensor_shape(graph, node.output[0], input_shape)
+                print(f"    RequantizeShift output shape: {input_shape}")
 
 def extract_subgraph(model: onnx.ModelProto, nodes: List[onnx.NodeProto]) -> onnx.ModelProto:
     """

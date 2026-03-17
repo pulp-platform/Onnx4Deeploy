@@ -2,12 +2,12 @@
 
 import torch
 import torch.nn as nn
-from einops import rearrange
 import math
 from collections import OrderedDict
 from functools import partial
 import numpy as np
 import brevitas.nn as qnn
+import torch.nn.functional as F
 from brevitas.inject.enum import FloatToIntImplType
 from brevitas.quant.scaled_int import (
     Int8ActPerTensorFloat,
@@ -19,12 +19,7 @@ from brevitas.quant.scaled_int import (
 from brevitas.quant_tensor import QuantTensor
 
 # local imports
-
-import preprocessing.sleep.hyperparams as cfg
-
-
-from DeepQuant.DeepQuant.ExportBrevitas import exportBrevitas
-from models.qlayers import IntGELU
+from DeepQuant.ExportBrevitas import exportBrevitas
 
 
 
@@ -49,8 +44,8 @@ convAndLinQuantParamsNoOutputQuant = {
     "input_quant": Int8ActPerTensorFloat,
     # "weight_quant": Int8WeightPerChannelFloat,
     "weight_quant": Int8WeightPerChannelFloat,
-    "output_quant": None,
-    "return_quant_tensor": False,
+    "output_quant": Int8ActPerTensorFloat,
+    "return_quant_tensor": True,
 }
 
 convAndLinQuantParams = {
@@ -108,21 +103,33 @@ class  MLPHead(nn.Module):
     def __init__(self, dim, hidden_dim, dropout_rate=0.0):
         super(MLPHead, self).__init__()
         self.ff1 = qnn.QuantLinear(dim, hidden_dim, **convAndLinQuantParams)
-        self.act = nn.GELU()
-        self.dropout1 = nn.Dropout(p=dropout_rate)
+        self.activation = F.gelu
+        #self.dropout1 = nn.Dropout(p=dropout_rate)
         self.ff2 = qnn.QuantLinear(hidden_dim, dim, **convAndLinQuantParams)
-        self.dropout2 = nn.Dropout(p=dropout_rate)
+        #self.dropout2 = nn.Dropout(p=dropout_rate)
 
     def forward(self, x):
         # input dim = encoder dim = 48
         x = self.ff1(x)
-        x = self.act(x)
-        x = self.dropout1(x)
+        x = self.activation(x)
+        #x = self.dropout1(x)
         x = self.ff2(x)
-        x = self.dropout2(x)
+        #x = self.dropout2(x)
         return x
 
 class Encoder(nn.Module):
+    """
+    Transformer Encoder block with multi-head attention and feedforward network.
+
+    Args:
+        embed_dim: Embedding dimension
+        num_heads: Number of attention heads
+        seq_len: Fixed sequence length
+        batch_size: Fixed batch size
+        att_dropout: Attention dropout rate (ignored in deploy version)
+        mlp_head_hidden_dim: Hidden dimension for MLP head
+        mlp_head_dropout: MLP dropout rate (ignored in deploy version)
+    """
     def __init__(self,
                  embed_dim,
                  nheads,
@@ -135,7 +142,7 @@ class Encoder(nn.Module):
                                                 nheads,
                                                 dropout=att_dropout,
                                                 batch_first=True,
-                                                packed_in_proj=True,
+                                                packed_in_proj=False,
                                                 **mhaQuantParams)
         self.ln_2 = nn.LayerNorm(embed_dim)
         self.ff = MLPHead(embed_dim,
@@ -165,9 +172,8 @@ class Encoder(nn.Module):
         x = x + _x
         return x
 
-class QConvBranch(nn.Module):
-    def __init__(self, in_channels=1, out_channels=16,
-                 kernel_size=25, stride=4, pool_kernel=4):
+class ConvStem(nn.Module):
+    def __init__(self, in_channels=1, out_channels=48, kernel_sizes=(25, 200, 100), stride=4, pool_kernel=4):
         """
         CNN branch for multi-scale feature extraction.
 
@@ -178,103 +184,103 @@ class QConvBranch(nn.Module):
             stride (int): Stride for downsampling in convolutional layers.
             pool_kernel (int): Kernel size for pooling layers.
         """
-        super(QConvBranch, self).__init__()
-
-
-        # Branch 1: Kernel size 25
-        self.conv1 = qnn.QuantConv1d(
-                in_channels=in_channels,
-                out_channels=out_channels,
-                kernel_size=kernel_size,
-                stride=stride,
-                padding=kernel_size // 2,
-                bias=False,
-                **convAndLinQuantParams)
-        self.relu1 = qnn.QuantReLU(bit_width=8, return_quant_tensor=True)
-        self.avg_pool = nn.AvgPool1d(kernel_size=pool_kernel, stride=pool_kernel)
-
-        self.conv2 = qnn.QuantConv1d(
-                in_channels=out_channels,
-                out_channels=out_channels,
-                kernel_size=3,
-                stride=2,
-                padding=1,
-                bias=False,
-                **convAndLinQuantParams)
-        self.relu2 = qnn.QuantReLU(bit_width=8, return_quant_tensor=True)  
-
-    def forward(self, x):
-        # Input shape: (batch_size, channels, sequence_length)
-        x = self.conv1(x)
-        x = self.relu1(x)
-        x = self.avg_pool(x)
-        x = self.conv2(x)
-        x = self.relu2(x)
-        return x
-
-def dump_txt(path, arr, scale=None):
-    # arr: numpy array
-    with open(path, "w") as f:
-        f.write(f"# shape: {arr.shape}\n")
-        if scale is not None:
-            f.write(f"# scale: {scale}\n")
-        flat = arr.reshape(-1)
-        for v in flat:
-            f.write(f"{int(v)} ")
-        f.write("\n")
-
-class ConvStem(nn.Module):
-    def __init__(self, in_channels=1, out_channels=48, kernel_sizes=(25, 100, 200), stride=4, pool_kernel=4):
-        """
-        Multi-Scale Convolutional Stem for feature extraction and downsampling.
-
-        Args:
-            in_channels (int): Number of input channels.
-            out_channels (int): Total number of output channels across all branches.
-            kernel_sizes (tuple): Kernel sizes for the three branches.
-            stride (int): Stride for downsampling in convolutional layers.
-            pool_kernel (int): Kernel size for pooling layers.
-        """
         super(ConvStem, self).__init__()
-        # Divide the total output channels equally across the branches
         branch_out_channels = out_channels // 3
 
         # Branch 1: Kernel size 25
-        self.branch1 = QConvBranch(in_channels=in_channels,
-                                   out_channels=branch_out_channels,
-                                   kernel_size=kernel_sizes[0],
-                                   stride=stride,
-                                   pool_kernel=pool_kernel)
-
-        self.branch2 = QConvBranch(in_channels=in_channels,
-                                    out_channels=branch_out_channels,
-                                    kernel_size=kernel_sizes[1],
-                                    stride=stride,
-                                    pool_kernel=pool_kernel)
-
-        self.branch3 = QConvBranch(in_channels=in_channels,
-                                    out_channels=branch_out_channels,
-                                    kernel_size=kernel_sizes[2],
-                                    stride=stride,
-                                    pool_kernel=pool_kernel)
-
+        self.branch1 = nn.Sequential(
+            qnn.QuantConv2d(
+                in_channels=in_channels,
+                out_channels=branch_out_channels,
+                kernel_size=(1, kernel_sizes[2]),  # (height, width)
+                stride=(1, stride),
+                padding=(0, kernel_sizes[2] // 2),
+                bias=True,
+                **convAndLinQuantParamsNoOutputQuant),
+            qnn.QuantReLU(bit_width=8, return_quant_tensor=True),
+            nn.MaxPool2d(kernel_size=(1, pool_kernel), stride=(1, pool_kernel)),
+            qnn.QuantConv2d(
+                in_channels=branch_out_channels,
+                out_channels=branch_out_channels,
+                kernel_size=(1, 3),
+                stride=(1, 2),
+                padding=(0, 1),
+                bias=True,
+                **convAndLinQuantParamsNoOutputQuant),
+            qnn.QuantReLU(bit_width=8, return_quant_tensor=True)
+        )
+        
+        # Branch 2: Kernel size 200
+        self.branch2 = nn.Sequential(
+            qnn.QuantConv2d(
+                in_channels=in_channels,
+                out_channels=branch_out_channels,
+                kernel_size=(1, kernel_sizes[1]),  # (height, width)
+                stride=(1, stride),
+                padding=(0, kernel_sizes[1] // 2),
+                bias=True,
+                **convAndLinQuantParamsNoOutputQuant),
+            qnn.QuantReLU(bit_width=8, return_quant_tensor=True),
+            nn.MaxPool2d(kernel_size=(1, pool_kernel), stride=(1, pool_kernel)),
+            qnn.QuantConv2d(
+                in_channels=branch_out_channels,
+                out_channels=branch_out_channels,
+                kernel_size=(1, 3),
+                stride=(1, 2),
+                padding=(0, 1),
+                bias=True,
+                **convAndLinQuantParamsNoOutputQuant),
+            qnn.QuantReLU(bit_width=8, return_quant_tensor=True)
+        )
+        
+          
+        # Branch 3: Kernel size 100
+        self.branch3 = nn.Sequential(
+            qnn.QuantConv2d(
+                in_channels=in_channels,
+                out_channels=branch_out_channels,
+                kernel_size=(1, kernel_sizes[2]),  # (height, width)
+                stride=(1, stride),
+                padding=(0, kernel_sizes[2] // 2),
+                bias=True,
+                **convAndLinQuantParamsNoOutputQuant),
+            qnn.QuantReLU(bit_width=8, return_quant_tensor=True),
+            nn.MaxPool2d(kernel_size=(1, pool_kernel), stride=(1, pool_kernel)),
+            qnn.QuantConv2d(
+                in_channels=branch_out_channels,
+                out_channels=branch_out_channels,
+                kernel_size=(1, 3),
+                stride=(1, 2),
+                padding=(0, 1),
+                bias=True,
+                **convAndLinQuantParamsNoOutputQuant),
+            qnn.QuantReLU(bit_width=8, return_quant_tensor=True)
+        )
+        
         self.cat_rescale = qnn.QuantIdentity(**actQuantParams)
 
+
     def forward(self, x):
-        # Input shape: (batch_size, channels, sequence_length)
-        x1 = self.branch1(x)  # Output from branch 1
-        x2 = self.branch2(x)  # Output from branch 2
-        x3 = self.branch3(x)  # Output from branch 3
+        """
+        Forward pass through dual-branch convolutional stem.
+
+        Args:
+            x: Input tensor of shape (batch_size, channels, height, width)
+               Expected: (B, 1, 1, 3000)
+
+        Returns:
+            Concatenated features from both branches (B, model_dim, 1, num_patches)
+        """
+        x1 = self.branch1(x)
+        x2 = self.branch2(x)
+        x3 = self.branch3(x)
+        
         x1 = self.cat_rescale(x1)
         x2 = self.cat_rescale(x2)
         x3 = self.cat_rescale(x3)
-
-        x = torch.cat((x1, x2, x3), dim=1)
-        # x = torch.cat((x1.tensor, x2.tensor, x3.tensor), dim=1)
-        # x = self.cat_rescale(x)
-        # scaling factors are different for each branch
-        # How does quantized contatenation work in brevitas?
-        return x
+        x12 = torch.cat((x1, x2), dim=1)
+        x123 = torch.cat((x12, x3), dim=1)
+        return x123
 
 class QSleepConViT(nn.Module):
     """Vision Transformer
@@ -301,13 +307,16 @@ class QSleepConViT(nn.Module):
             # drop_path_rate=0.0,
             # norm_layer=None):
         super().__init__()
-        self.num_classes = config["num_classes"]
-        self.model_dim = config["model_dim"]
-        self.inputQuant = qnn.QuantIdentity(**actQuantParams)
+        self.num_heads = config.get("num_heads", 8)
+        self.model_dim = config.get("model_dim", 48)
+        self.num_patches = config.get("num_patches", 94)
+        self.num_classes = config.get("num_classes", 4)
+        self.batch_size = config.get("batch_size", 1)
+        seq_len = config.get("seq_len", 95)  # num_patches + 1 (for CLS token)
 
         self.conv_stem = ConvStem(in_channels=1,
                                   out_channels=self.model_dim,
-                                  kernel_sizes=(25, 100, 200),
+                                  kernel_sizes=(25, 200, 100),
                                   stride=4)
 
         num_patches = config["num_patches"]
@@ -315,6 +324,10 @@ class QSleepConViT(nn.Module):
         self.cls_token = nn.Parameter(torch.zeros(1, 1, self.model_dim))
         self.pos_embed = nn.Parameter(
             torch.zeros(1, num_patches + 1, self.model_dim))
+        
+        # CLS token selector (fixed one-hot vector for ONNX-friendly extraction)
+        self.cls_selector = nn.Parameter(torch.zeros(1, self.num_patches + 1), requires_grad=False)
+        self.cls_selector.data[0, 0] = 1.0  # Select only the first token (CLS)
 
         self.pos_drop = nn.Dropout(p=config["attention_dropout"])
 
@@ -331,15 +344,12 @@ class QSleepConViT(nn.Module):
 
         self.head = qnn.QuantLinear(self.model_dim, self.num_classes, **convAndLinQuantParams)
 
-    def forward_features(self, x):
-        B = x.shape[0]
-        x = x.permute(0, 2, 1) # Transpose to B x C x N for Conv stem
+    def forward(self, x):
         x = self.conv_stem(x)
 
-        x = x.permute(0, 2, 1) # transpose back to B x N x C
-        cls_tokens = self.cls_token.expand(
-            B, -1, -1
-        )  # stole cls_tokens impl from Phil Wang, thanks
+        x = x.reshape(self.batch_size, self.model_dim, self.num_patches).permute(0, 2, 1)
+
+        cls_tokens = self.cls_token.expand(self.batch_size, -1, -1) 
         cls_tokens = self.qaddpos(cls_tokens)
         x = self.qaddpos(x)
         x_cls = torch.cat((cls_tokens, x), dim=1)
@@ -347,12 +357,11 @@ class QSleepConViT(nn.Module):
         x_pos = x_cls + pos
         x = self.encoder(x_pos)
         x = self.norm(x)
-        x = x[:, 0, :]  # Select the class token
+        x = torch.matmul(self.cls_selector, x)
+        x = x.squeeze(1)  # [B, 1, 48] -> [B, 48]
         x = self.rescale_norm(x)
-        return x
-
-    def forward(self, x):
-        x = self.inputQuant(x)
-        x = self.forward_features(x)
+        print(F"hello")
         x = self.head(x)
+        print(F"hello2222")
+
         return x
