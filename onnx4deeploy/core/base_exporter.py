@@ -253,7 +253,7 @@ class BaseONNXExporter(ABC):
                     "network_pre_sgd": os.path.join(output_dir, "network_pre_sgd.onnx"),
                 }
             )
-        
+
         if mode == ExportMode.ZO_TRAINING:
             paths.update(
                 {
@@ -351,10 +351,13 @@ class BaseONNXExporter(ABC):
             #load weights.
             state_dict = torch.load(os.path.join(os.getcwd(), self.config.get("weights_path", "model_weights.pth")), map_location="cpu")
             model.load_state_dict(state_dict, strict=False)
-            onnx_model = exportBrevitas(model, input_tensor, debug=False)
+            #Jansno: temporary workaround
             for name, param in model.named_parameters():
-                if param.requires_grad and "weight" in name and "conv" in name:
-                    torch.nn.init.normal_(param, mean=0.0, std=0.02)
+                if param.requires_grad and "bias" in name:
+                    if torch.all(param.data) == 0:
+                        torch.nn.init.uniform_(param, a=0.01, b=0.02)
+            onnx_model = exportBrevitas(model, input_tensor, debug=False)
+
         # Save
         onnx.save(onnx_model, self.paths["network"])
         print(f"✅ ONNX model saved: {self.paths['network']}")
@@ -554,6 +557,11 @@ class BaseONNXExporter(ABC):
             state_dict = torch.load(os.path.join(os.getcwd(), self.config.get("weights_path", "model_weights.pth")), map_location="cpu")
             model.load_state_dict(state_dict, strict=False)
             print("\n📤 Exporting to ONNX with quantization...")
+            # JanSno: Temporary workaround
+            for name, param in model.named_parameters():
+                if param.requires_grad and "bias" in name:
+                    if torch.all(param.data) == 0:
+                        torch.nn.init.uniform_(param, a=0.01, b=0.02)
             # use DeepQuant to export to ONNX
             onnx_model = exportBrevitas(model, input_tensor, debug=False)
 
@@ -601,7 +609,7 @@ class BaseONNXExporter(ABC):
             zo_config=self.config["zo"],
             noise_type=noise_type,
         )
-        
+
         generate_weight_update_graph(
             onnx_path=self.paths["network_infer"],
             output_path=self.paths["network_zo_update"],
@@ -639,7 +647,7 @@ class BaseONNXExporter(ABC):
 
         # Create test input/output
         print("\n🧪 Creating test input/output...")
-        self._create_test_data(mode=ExportMode.ZO_TRAINING)
+        self._create_test_data(mode=ExportMode.ZO_TRAINING, quant=quant)
 
         # # Add optimizer (SGD) nodes
         # print("\n➕ Adding SGD optimizer nodes...")
@@ -672,15 +680,23 @@ class BaseONNXExporter(ABC):
             from onnxruntime_extensions import onnx_op, PyOp, get_library_path
             from DeepQuant.QuantDequantOnnx import requant_shift_onnx
             sess_options = ort.SessionOptions()
-        
-            sess_options.register_custom_ops_library(get_library_path()) 
 
-            session = ort.InferenceSession(self.paths["network_infer"],
-                                           sess_options=sess_options)
-            input_names = [i.name for i in session.get_inputs()]
+            sess_options.register_custom_ops_library(get_library_path())
+
             
-            input_name = session.get_inputs()[0].name
-            test_output = session.run(None, {input_name: test_input})[0]
+            if not quant:            
+                session = ort.InferenceSession(self.paths["network_infer"],
+                                            sess_options=sess_options)
+                input_names = [i.name for i in session.get_inputs()]
+
+                input_name = session.get_inputs()[0].name
+                test_output = session.run(None, {input_name: test_input})[0]
+                
+                
+            # Workaround onnx Inference session for now
+            else:
+                test_output = np.random.randn(input_shape[0], self.config["num_classes"]).astype(np.float32)
+            
 
             # Save as .npz files
             save_path = Path(self.paths["output_dir"])

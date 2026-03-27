@@ -783,5 +783,6 @@ def append_cross_entropy_loss(onnx_path, output_path, label_name='y', logits_out
     try:
         inferred = shape_inference.infer_shapes(model)
         onnx.save(inferred, output_path)
-    except Exception:
+    except Exception as e:
+        print(F" shape inference failed, saving without shape inference. Error was: {e}")
         onnx.save(model, output_path)

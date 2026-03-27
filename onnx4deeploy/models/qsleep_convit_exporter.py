@@ -68,7 +68,7 @@ class QSleepConViTExporter(BaseONNXExporter):
             "zo": {
                 "epsilon": 0.1,
                 "seed": 42,
-                "exceptions": "node_matmul_2"
+                "exceptions": ["node_matmul", "node_bmm_requant", "node_bmm_1_requant"]
             },
             "weights_path":"onnx4deeploy/models/pytorch_models/sleep_convit/qsleep_convit.pth"
         }
