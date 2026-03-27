@@ -16,6 +16,7 @@ Usage:
 
 import argparse
 import json
+from collections import defaultdict
 from typing import Any, Dict, Tuple, Optional
 
 import numpy as np
@@ -60,6 +61,93 @@ def _infer_signed_from_zero_point(zp_arr: Optional[np.ndarray]) -> bool:
         return False
     # fallback
     return True
+
+
+# ---------------------------
+# Duplicate tensor name repair
+# ---------------------------
+
+def fix_duplicate_tensor_names(onnx_model: onnx.ModelProto) -> onnx.ModelProto:
+    """
+    Fix duplicate initializer and node output names in an ONNX graph.
+
+    When torch.onnx.export traces a model with multiple quantizers that share
+    the same name prefix, it can produce:
+      - Multiple initializers with the same name but different values
+      - Multiple node outputs with the same name
+
+    Both conditions produce invalid ONNX that ORT rejects. This pass repairs
+    them by renaming duplicate occurrences to unique names and rewiring
+    downstream consumers accordingly.
+    """
+    graph = onnx_model.graph
+
+    # --- Step 1: fix duplicate initializers ---
+    init_occs = defaultdict(list)
+    for init in graph.initializer:
+        init_occs[init.name].append(init)
+
+    init_rename = {}
+    new_inits = []
+    for name, occ_list in init_occs.items():
+        for k, orig in enumerate(occ_list):
+            new_tensor = onnx.TensorProto()
+            new_tensor.CopyFrom(orig)
+            new_name = name if k == 0 else f"{name}__v{k + 1}"
+            new_tensor.name = new_name
+            new_inits.append(new_tensor)
+            init_rename[(name, k)] = new_name
+
+    del graph.initializer[:]
+    graph.initializer.extend(new_inits)
+
+    dup_init_names = {name for name, occs in init_occs.items() if len(occs) > 1}
+    next_occ = defaultdict(int)
+    for node in graph.node:
+        updated = list(node.input)
+        for i, inp in enumerate(node.input):
+            if inp in dup_init_names:
+                occ = next_occ[inp]
+                next_occ[inp] += 1
+                updated[i] = init_rename[(inp, min(occ, len(init_occs[inp]) - 1))]
+        del node.input[:]
+        node.input.extend(updated)
+
+    # --- Step 2: fix duplicate node outputs ---
+    produced = set()
+    active_name: Dict[str, str] = {}
+
+    for node in graph.node:
+        updated_in = list(node.input)
+        for i, inp in enumerate(node.input):
+            if inp in active_name:
+                updated_in[i] = active_name[inp]
+        del node.input[:]
+        node.input.extend(updated_in)
+
+        updated_out = list(node.output)
+        for i, out in enumerate(node.output):
+            if not out:
+                continue
+            if out in produced:
+                v = 2
+                new_out = f"{out}__v{v}"
+                while new_out in produced:
+                    v += 1
+                    new_out = f"{out}__v{v}"
+                active_name[out] = new_out
+                updated_out[i] = new_out
+                produced.add(new_out)
+            else:
+                produced.add(out)
+        del node.output[:]
+        node.output.extend(updated_out)
+
+    for out_vi in graph.output:
+        if out_vi.name in active_name:
+            out_vi.name = active_name[out_vi.name]
+
+    return onnx_model
 
 
 # ---------------------------
@@ -129,11 +217,14 @@ def replace_qdq_with_deeploy(graph: gs.Graph) -> None:
             bit_width = 8  # Deeploy QuantParser expects bit_width attribute; typical is 8. [2](https://deepwiki.com/pulp-platform/Deeploy/8.1-quantization-and-training-support)
 
             # Create Deeploy Quant node
+            old_outputs = list(node.outputs)
+            node.inputs.clear()
+            node.outputs.clear()
             q = gs.Node(
                 op="Quant",
                 name=(node.name or "Quant") + "_Deeploy",
                 inputs=[x],
-                outputs=node.outputs,
+                outputs=old_outputs,
                 attrs={
                     "scale": float(scale.reshape(-1)[0]) if scale.size == 1 else scale.astype(np.float32),
                     "zero_point": int(zp.reshape(-1)[0]) if (zp is not None and zp.size == 1) else (zp.astype(np.int32) if zp is not None else 0),
@@ -158,11 +249,14 @@ def replace_qdq_with_deeploy(graph: gs.Graph) -> None:
             if scale is None:
                 raise RuntimeError(f"DequantizeLinear node {node.name} has non-constant scale; provide constant initializer.")
 
+            old_outputs = list(node.outputs)
+            node.inputs.clear()
+            node.outputs.clear()
             dq = gs.Node(
                 op="Dequant",
                 name=(node.name or "Dequant") + "_Deeploy",
                 inputs=[xq],
-                outputs=node.outputs,
+                outputs=old_outputs,
                 attrs={
                     "scale": float(scale.reshape(-1)[0]) if scale.size == 1 else scale.astype(np.float32),
                     "zero_point": int(zp.reshape(-1)[0]) if (zp is not None and zp.size == 1) else (zp.astype(np.int32) if zp is not None else 0),

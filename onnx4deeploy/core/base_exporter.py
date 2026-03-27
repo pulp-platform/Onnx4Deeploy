@@ -28,6 +28,7 @@ from onnxruntime.training import artifacts
 from DeepQuant.Export4Deeploy import exportBrevitas
 
 from .onnx_utils import print_model_info, randomize_onnx_initializers
+from onnx4deeploy.transform.quant_transform import fix_duplicate_tensor_names
 from onnx4deeploy.transform.zo_transform import generate_weight_update_graph, generate_zo_graph
 
 
@@ -372,6 +373,14 @@ class BaseONNXExporter(ABC):
 
         infer_shapes_with_custom_ops(self.paths["network"], self.paths["network"])
 
+        # Fix duplicate initializer/node-output names introduced by
+        # onnx.save's write_external_data_tensors on gs-exported models.
+        if quant:
+            _m = onnx.load(self.paths["network"])
+            _m = fix_duplicate_tensor_names(_m)
+            with open(self.paths["network"], "wb") as _f:
+                _f.write(_m.SerializeToString())
+
         # Save test input/output data if method is implemented
         if hasattr(self, "save_test_data"):
             try:
@@ -564,6 +573,7 @@ class BaseONNXExporter(ABC):
                         torch.nn.init.uniform_(param, a=0.01, b=0.02)
             # use DeepQuant to export to ONNX
             onnx_model = exportBrevitas(model, input_tensor, debug=False)
+            onnx_model = fix_duplicate_tensor_names(onnx_model)
 
         # Save
         onnx.save(onnx_model, self.paths["network_infer"])

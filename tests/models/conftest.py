@@ -64,6 +64,19 @@ def epidenet_config():
 
 
 @pytest.fixture
+def qlitecnn_config():
+    """Default configuration for QLiteCNN quantized model."""
+    return {
+        "batch_size": 1,
+        "input_channels": 1,
+        "input_height": 28,
+        "input_width": 28,
+        "num_classes": 10,
+        "opset_version": 17,
+    }
+
+
+@pytest.fixture
 def mibminet_config():
     """Default configuration for MI-BMInet model."""
     return {
