@@ -21,7 +21,9 @@ Usage:
 import argparse
 import sys
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
+
+from onnx4deeploy.core.optimizer_onnx import derive_optimizer_dir
 
 # Add project root to path
 project_root = Path(__file__).parent
@@ -31,7 +33,9 @@ sys.path.insert(0, str(project_root))
 def list_available_models():
     """List available model exporters"""
     from onnx4deeploy.models import (
+        AutoencoderExporter,
         CCTExporter,
+        DSCNNExporter,
         EpiDeNetExporter,
         LightweightCnnExporter,
         MambaExporter,
@@ -39,8 +43,11 @@ def list_available_models():
         MobileNetV2Exporter,
         MobileViTExporter,
         ResNetExporter,
+        SimpleCnnExporter,
         SimpleMlpExporter,
         SleepConViTExporter,
+        TinyTransformerExporter,
+        TinyViTExporter,
     )
 
     models = {
@@ -101,6 +108,27 @@ def list_available_models():
             "input_shape": "(B, 3, 32, 32)",
             "classes": 10,
         },
+        "TinyViT-5M": {
+            "class": TinyViTExporter,
+            "description": "TinyViT-5M (Compact Vision Transformer, ~5M params)",
+            "input_shape": "(B, 3, 64, 64)",
+            "classes": 10,
+            "config": {"variant": "tiny_vit_5m", "img_size": 64, "num_classes": 10},
+        },
+        "TinyViT-11M": {
+            "class": TinyViTExporter,
+            "description": "TinyViT-11M (Compact Vision Transformer, ~11M params)",
+            "input_shape": "(B, 3, 64, 64)",
+            "classes": 10,
+            "config": {"variant": "tiny_vit_11m", "img_size": 64, "num_classes": 10},
+        },
+        "TinyViT-21M": {
+            "class": TinyViTExporter,
+            "description": "TinyViT-21M (Compact Vision Transformer, ~21M params)",
+            "input_shape": "(B, 3, 64, 64)",
+            "classes": 10,
+            "config": {"variant": "tiny_vit_21m", "img_size": 64, "num_classes": 10},
+        },
         "Mamba": {
             "class": MambaExporter,
             "description": "Mamba (Selective State Space Model for Sequences)",
@@ -127,11 +155,72 @@ def list_available_models():
             "input_shape": "(B, 1, 3000)",
             "classes": 5,
         },
+        # ── MLperf Tiny Benchmarks ──────────────────────────────────────────
+        # IC  — Image Classification (CIFAR-10, ResNet-8)
+        "ResNet8": {
+            "class": ResNetExporter,
+            "description": "ResNet-8 (MLperf Tiny IC, CIFAR-10, ~78K params)",
+            "input_shape": "(B, 3, 32, 32)",
+            "classes": 10,
+            "config": {"variant": "resnet8", "img_size": 32, "num_classes": 10},
+        },
+        # VWW — Visual Wake Words (MobileNetV2-0.35, 96×96, 2 classes)
+        "MobileNetV2-VWW": {
+            "class": MobileNetV2Exporter,
+            "description": "MobileNetV2-0.35 (MLperf Tiny VWW, 96×96, person/not-person)",
+            "input_shape": "(B, 3, 96, 96)",
+            "classes": 2,
+            "config": {"width_mult": 0.35, "img_size": 96, "num_classes": 2},
+        },
+        # KWS — Keyword Spotting (DS-CNN-XS, MFCC 25×10, 12 classes)
+        "DSCNN": {
+            "class": DSCNNExporter,
+            "description": "DS-CNN-XS (MLperf Tiny KWS, MFCC 25×10, 12 classes, ~10K params)",
+            "input_shape": "(B, 1, 25, 10)",
+            "classes": 12,
+            "config": {"variant": "xs", "n_time": 25, "n_freq": 10},
+        },
+        # KWS full-size reference (DS-CNN-S, 49×10)
+        "DSCNN-S": {
+            "class": DSCNNExporter,
+            "description": "DS-CNN-S (MLperf Tiny KWS reference, MFCC 49×10, ~270K params)",
+            "input_shape": "(B, 1, 49, 10)",
+            "classes": 12,
+            "config": {"variant": "s", "n_time": 49, "n_freq": 10},
+        },
+        # AD  — Anomaly Detection (FC Autoencoder, 128-dim, MSE loss)
+        "Autoencoder": {
+            "class": AutoencoderExporter,
+            "description": "FC Autoencoder-tiny (MLperf Tiny AD, 128-dim, MSE loss, ~26K params)",
+            "input_shape": "(B, 128)",
+            "classes": None,
+            "config": {"variant": "tiny", "input_dim": 128},
+        },
+        # AD  — full MLperf Tiny reference autoencoder
+        "Autoencoder-MLPerf": {
+            "class": AutoencoderExporter,
+            "description": "FC Autoencoder (MLperf Tiny AD reference, 128→[128,128,128]→128)",
+            "input_shape": "(B, 128)",
+            "classes": None,
+            "config": {"variant": "mlperf", "input_dim": 128},
+        },
         # Simple Models
         "SimpleMLP": {
             "class": SimpleMlpExporter,
             "description": "Simple Multi-Layer Perceptron (Demo)",
             "input_shape": "(B, 1, 28, 28)",
+            "classes": 10,
+        },
+        "SimpleCNN": {
+            "class": SimpleCnnExporter,
+            "description": "Simple CNN (2 strided-conv + FC, no MaxPool, training-ready)",
+            "input_shape": "(B, 1, 16, 16)",
+            "classes": 10,
+        },
+        "TinyTransformer": {
+            "class": TinyTransformerExporter,
+            "description": "Tiny Patch Transformer for MNIST (~10K params, fast compile)",
+            "input_shape": "(B, 16, 49)",
             "classes": 10,
         },
         "LightweightCNN": {
@@ -151,6 +240,7 @@ def list_available_operators():
         "Add": "Addition operator",
         "Relu": "ReLU activation function",
         "Transpose": "Tensor transpose",
+        "Concat": "Tensor concatenation (supports 3 inputs)",
         "Split": "Tensor split",
         # Matrix operations
         "Gemm": "General matrix multiplication",
@@ -166,13 +256,18 @@ def list_available_operators():
         "GroupNormGradX": "Group normalization input gradient",
         "GroupNormGradW": "Group normalization weight gradient",
         # Convolution
+        "Conv2D": "2D convolution (supports asymmetric padding)",
         "ConvGradX": "Convolution input gradient",
         "ConvGradW": "Convolution weight gradient",
+        "ConvGrad": "Combined convolution input + weight gradient (dX + dW [+ dB])",
         "ConvGradB": "Convolution bias gradient",
         # Others
         "ReduceSum": "Sum reduction",
         "SoftmaxCrossEntropy": "Softmax cross entropy",
+        "SoftmaxCrossEntropyDualOutput": "Softmax cross entropy (loss + log_prob outputs)",
         "ReluGrad": "ReLU gradient",
+        # Training operators (custom domain: com.microsoft)
+        "InPlaceAccumulatorV2": "Gradient accumulation with lazy reset (com.microsoft)",
     }
     return operators
 
@@ -198,8 +293,15 @@ def generate_operator(operator_name: str, output_path: Optional[str] = None):
         ]
 
         # Try multiple module name patterns
+        import re as _re
+
+        _snake = _re.sub(
+            r"(?<=[a-z0-9])(?=[A-Z])", "_", operator_name
+        ).lower()  # ConvGradXW → conv_grad_xw
         possible_module_names = [
             f"{operator_name.lower()}",  # relu
+            _snake,  # conv_grad_xw
+            f"{_snake}_xw",  # conv_grad → conv_grad_xw (legacy filename)
             f"{operator_name.lower()}_operator",  # relu_operator
             f"{operator_name.lower()}_exporter",  # relu_exporter
         ]
@@ -248,7 +350,21 @@ def generate_operator(operator_name: str, output_path: Optional[str] = None):
         sys.exit(1)
 
 
-def generate_model(model_name: str, mode: str, output_path: Optional[str] = None):
+def generate_model(
+    model_name: str,
+    mode: str,
+    output_path: Optional[str] = None,
+    n_batches: Optional[int] = None,
+    n_steps: Optional[int] = None,
+    n_epochs: Optional[float] = None,
+    n_accum: int = 1,
+    batch_size: int = 1,
+    dataset: str = "random",
+    data_path: Optional[str] = None,
+    data_size: Optional[int] = None,
+    learning_rate: Optional[float] = None,
+    classes: Optional[List[int]] = None,
+):
     """Generate model ONNX"""
     print(f"\n{'='*70}")
     print(f"🚀 Generating model: {model_name} ({mode.upper()} mode)")
@@ -283,10 +399,56 @@ def generate_model(model_name: str, mode: str, output_path: Optional[str] = None
         # Create exporter
         exporter = model_class(save_path=output_path)
 
-        # Apply model-specific configuration if available
+        # Resolve n_batches from whichever training-length parameter was given.
+        # Priority: --n-batches > --n-steps > --n-epochs > default(4)
+        if mode == "train":
+            import math
+
+            if n_batches is not None:
+                # explicit --n-batches: use as-is (auto-rounded in create_training_test_data)
+                pass
+            elif n_steps is not None:
+                # --n-steps S  →  n_batches = S × n_accum
+                n_batches = n_steps * n_accum
+                print(f"📐 --n-steps {n_steps}  × --n-accum {n_accum}  → n_batches={n_batches}")
+            elif n_epochs is not None:
+                # --n-epochs E  →  n_batches = ceil(E × data_size / n_accum) × n_accum
+                if data_size is None:
+                    print("❌ --n-epochs requires --data-size to be set")
+                    sys.exit(1)
+                total_samples = n_epochs * data_size
+                n_batches = math.ceil(total_samples / n_accum) * n_accum
+                actual_epochs = n_batches / data_size
+                print(
+                    f"📐 --n-epochs {n_epochs}  × data_size {data_size}  ÷ --n-accum {n_accum}"
+                    f"  → n_batches={n_batches}  (≈{actual_epochs:.1f} epochs)"
+                )
+            else:
+                n_batches = 4  # default
+
+        # Store CLI overrides that must survive the internal load_config() call
+        # inside export_training().  Exporters that support _config_overrides
+        # will apply these at the end of their load_config() implementation.
+        exporter._config_overrides = {}
+        if mode == "train":
+            exporter._config_overrides["n_batches"] = n_batches
+            exporter._config_overrides["n_accum"] = n_accum
+            exporter._config_overrides["batch_size"] = batch_size
+            if learning_rate is not None:
+                exporter._config_overrides["learning_rate"] = learning_rate
+        # Dataset selection applies to both infer and train data generation
+        exporter._config_overrides["dataset"] = dataset
+        if data_path is not None:
+            exporter._config_overrides["data_path"] = data_path
+        if data_size is not None:
+            exporter._config_overrides["data_size"] = data_size
+        if classes is not None:
+            exporter._config_overrides["classes"] = classes
+
+        # Apply model-specific configuration via _config_overrides so it survives
+        # the internal load_config() call inside export_inference/export_training().
         if "config" in models[model_key]:
-            exporter.config = exporter.load_config()
-            exporter.config.update(models[model_key]["config"])
+            exporter._config_overrides.update(models[model_key]["config"])
 
         # Export according to mode
         if mode == "infer":
@@ -311,6 +473,19 @@ def generate_model(model_name: str, mode: str, output_path: Optional[str] = None
         files_to_check = ["network.onnx", "inputs.npz", "outputs.npz"]
         if mode == "train":
             files_to_check.extend(["network_train.onnx", "optimizer_model.onnx"])
+            # Also show the optimizer ONNX written to the sibling _optimizer directory.
+            opt_dir = derive_optimizer_dir(output_path)
+            if opt_dir is not None:
+                opt_onnx = Path(opt_dir) / "network.onnx"
+                if opt_onnx.exists():
+                    size = opt_onnx.stat().st_size / 1024
+                    size_str = f"{size:.1f} KB" if size < 1024 else f"{size/1024:.1f} MB"
+                    rel = str(
+                        opt_onnx.relative_to(output_dir.parent)
+                        if output_dir.parent in opt_onnx.parents
+                        else opt_onnx
+                    )
+                    print(f"  ✓ {'optimizer/network.onnx':<25} ({size_str})  [{rel}]")
 
         for file in files_to_check:
             file_path = output_dir / file
@@ -348,6 +523,7 @@ def print_usage_examples():
     print("")
     print("  # Hybrid and Transformer models")
     print("  python Onnx4Deeploy.py -model MobileViT-XS -mode infer -o ./output/mobilevit")
+    print("  python Onnx4Deeploy.py -model TinyViT-5M -mode infer -o ./output/tinyvit_5m")
     print("  python Onnx4Deeploy.py -model CCT -mode infer -o ./output/cct_infer")
     print("  python Onnx4Deeploy.py -model CCT -mode train -o ./output/cct_train")
     print("  python Onnx4Deeploy.py -model Mamba -mode infer -o ./output/mamba")
@@ -398,7 +574,7 @@ Examples:
         "--model",
         type=str,
         metavar="NAME",
-        help="Generate model ONNX (e.g.: ResNet18, ResNet50, MobileNetV2, MobileViT-XS, CCT, Mamba, MIBMInet)",
+        help="Generate model ONNX (e.g.: ResNet18, ResNet50, MobileNetV2, MobileViT-XS, TinyViT-5M, CCT, Mamba, MIBMInet)",
     )
 
     # Model mode parameters
@@ -425,6 +601,106 @@ Examples:
     list_group.add_argument("--list-models", action="store_true", help="List all available models")
     list_group.add_argument(
         "--list-operators", action="store_true", help="List all available operators"
+    )
+
+    # Training-specific options
+    train_len_group = parser.add_mutually_exclusive_group()
+    train_len_group.add_argument(
+        "--n-epochs",
+        type=float,
+        default=None,
+        dest="n_epochs",
+        metavar="E",
+        help="(train mode) Number of full passes over the data pool. "
+        "Requires --data-size. n_batches = ceil(E × data_size / n_accum) × n_accum. "
+        "Example: --data-size 20 --n-accum 8 --n-epochs 25 → n_batches=504.",
+    )
+    train_len_group.add_argument(
+        "--n-steps",
+        type=int,
+        default=None,
+        dest="n_steps",
+        metavar="S",
+        help="(train mode) Number of SGD weight-update steps. "
+        "n_batches = S × n_accum. "
+        "Example: --n-steps 63 --n-accum 8 → n_batches=504.",
+    )
+    train_len_group.add_argument(
+        "--n-batches",
+        type=int,
+        default=None,
+        dest="n_batches",
+        metavar="N",
+        help="(train mode) Total forward-pass count (low-level, backward-compat). "
+        "Auto-rounded down to nearest multiple of n_accum if not divisible. "
+        "Prefer --n-epochs or --n-steps for clearer semantics.",
+    )
+    parser.add_argument(
+        "--n-accum",
+        type=int,
+        default=1,
+        dest="n_accum",
+        metavar="N",
+        help="(train mode) Effective batch size: number of samples accumulated "
+        "per SGD update (gradient accumulation). Default: 1.",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=1,
+        dest="batch_size",
+        metavar="N",
+        help="(train mode) Number of samples per mini-batch (batch size). Default: 1.",
+    )
+    parser.add_argument(
+        "--dataset",
+        type=str,
+        default="random",
+        choices=["random", "mnist"],
+        dest="dataset",
+        help="Data source for training test data. "
+        "'random' (default): random Gaussian inputs. "
+        "'mnist': real MNIST images (downloaded automatically if needed).",
+    )
+    parser.add_argument(
+        "--data-path",
+        type=str,
+        default=None,
+        dest="data_path",
+        metavar="PATH",
+        help="Root directory for dataset files (used with --dataset mnist). "
+        "Default: /tmp/mnist.",
+    )
+    parser.add_argument(
+        "--data-size",
+        type=int,
+        default=None,
+        dest="data_size",
+        metavar="N",
+        help="(mnist) Fixed pool size for epoch-cycling mode. "
+        "None (default): each batch draws fresh random images — no loss descent visible. "
+        "N: fix a pool of N images and cycle through them with per-epoch shuffle — "
+        "loss descends as the network repeatedly sees the same images. "
+        "Rule of thumb: set --n-batches to at least 4×N for visible convergence.",
+    )
+    parser.add_argument(
+        "--lr",
+        type=float,
+        default=None,
+        dest="learning_rate",
+        metavar="LR",
+        help="(train mode) SGD learning rate. Overrides the exporter's default "
+        "(typically 0.001). Example: --lr 0.05.",
+    )
+    parser.add_argument(
+        "--classes",
+        type=int,
+        nargs="+",
+        default=None,
+        dest="classes",
+        metavar="C",
+        help="(mnist) Restrict training to specific digit classes. "
+        "Example: --classes 0 8  trains a binary 0-vs-8 classifier.",
     )
 
     # Other options
@@ -472,7 +748,21 @@ Examples:
     if args.operator:
         generate_operator(args.operator, args.output)
     elif args.model:
-        generate_model(args.model, args.mode, args.output)
+        generate_model(
+            args.model,
+            args.mode,
+            args.output,
+            n_batches=args.n_batches,
+            n_steps=args.n_steps,
+            n_epochs=args.n_epochs,
+            n_accum=args.n_accum,
+            batch_size=args.batch_size,
+            dataset=args.dataset,
+            data_path=args.data_path,
+            data_size=args.data_size,
+            learning_rate=args.learning_rate,
+            classes=args.classes,
+        )
 
 
 if __name__ == "__main__":

@@ -19,6 +19,35 @@ import torch
 from onnx import TensorProto, helper, numpy_helper
 
 
+def convert_convgrad_nodes(input_onnx: str, output_onnx: str) -> None:
+    """
+    Rename every ConvGrad node to ConvGradXW in-place.
+
+    ORT emits ``ConvGrad`` with inputs [dY, X, W] and up to 3 outputs [dX, dW, dB].
+    Deeploy's ``ConvGradXW`` operator uses the identical signature, so this pass
+    is a pure op-type rename — no structural changes to inputs, outputs, or
+    attributes.  The first conv layer's dX output may be an empty string (ORT
+    does not compute the input gradient for the network's data tensor); that is
+    preserved as-is and handled by the Deeploy mapper.
+
+    Args:
+        input_onnx: Path to the input ONNX model.
+        output_onnx: Path to save the converted model.
+    """
+    model = onnx.load(input_onnx)
+    graph = model.graph
+
+    count = 0
+    for node in graph.node:
+        if node.op_type == "ConvGrad":
+            node.op_type = "ConvGradXW"
+            node.name = node.name.replace("ConvGrad_", "ConvGradXW_") + "_ConvGradXW"
+            count += 1
+
+    onnx.save(model, output_onnx)
+    print(f"✅ Renamed {count} ConvGrad → ConvGradXW")
+
+
 def split_convgrad_nodes(input_onnx: str, output_onnx: str) -> None:
     """
     Split ConvGrad nodes with 3 outputs into 3 separate nodes.

@@ -10,6 +10,7 @@ and custom optimization passes.
 """
 
 import subprocess
+import sys
 from typing import Tuple
 
 
@@ -30,7 +31,7 @@ def run_onnx_optimization_infer(
         print("🔹 Fixing dynamic shape...")
         subprocess.run(
             [
-                "python",
+                sys.executable,
                 "-m",
                 "onnxruntime.tools.make_dynamic_shape_fixed",
                 "--input_name",
@@ -46,7 +47,7 @@ def run_onnx_optimization_infer(
         print("🔹 Running symbolic shape inference...")
         subprocess.run(
             [
-                "python",
+                sys.executable,
                 "-m",
                 "onnxruntime.tools.symbolic_shape_infer",
                 "--input",
@@ -62,7 +63,7 @@ def run_onnx_optimization_infer(
         print("🔹 Optimizing ONNX model for ViT...")
         subprocess.run(
             [
-                "python",
+                sys.executable,
                 "-m",
                 "onnxruntime.transformers.optimizer",
                 "--input",
@@ -107,7 +108,7 @@ def run_onnx_optimization(
         print("🔹 Fixing dynamic shape...")
         subprocess.run(
             [
-                "python",
+                sys.executable,
                 "-m",
                 "onnxruntime.tools.make_dynamic_shape_fixed",
                 "--input_name",
@@ -123,7 +124,7 @@ def run_onnx_optimization(
         print("🔹 Running symbolic shape inference...")
         subprocess.run(
             [
-                "python",
+                sys.executable,
                 "-m",
                 "onnxruntime.tools.symbolic_shape_infer",
                 "--input",
@@ -139,7 +140,7 @@ def run_onnx_optimization(
         print("🔹 Optimizing ONNX model for ViT...")
         subprocess.run(
             [
-                "python",
+                sys.executable,
                 "-m",
                 "onnxruntime.transformers.optimizer",
                 "--input",

@@ -308,7 +308,7 @@ def create_training_pipeline() -> "OptimizationPipeline":
 
 
 def create_transformer_inference_pipeline(
-    embedding_dim: int, num_heads: int, input_shape: tuple
+    embedding_dim: int, num_heads: int, input_shape: tuple, skip_ort_transformer: bool = False
 ) -> "OptimizationPipeline":
     """
     Create inference pipeline for transformer models (CCT, ViT, etc.).
@@ -319,6 +319,11 @@ def create_transformer_inference_pipeline(
         embedding_dim: Model embedding dimension
         num_heads: Number of attention heads
         input_shape: Input tensor shape
+        skip_ort_transformer: If True, skip the ONNXRuntimeTransformerPass. Must be
+            set to True for training-mode exports: the ORT inference optimizer fuses
+            ops into com.microsoft custom ops that have no standard ONNX shape inference
+            support, causing generate_artifacts to fail (infer_shapes_on_base cannot
+            infer the SoftmaxCrossEntropyLoss output shape).
 
     Returns:
         OptimizationPipeline with transformer-specific optimizations
@@ -333,29 +338,38 @@ def create_transformer_inference_pipeline(
     # Add rename pass before ONNX Runtime optimization
     pipeline.add_pass(RenameNodesPass())
 
-    # Add ONNX Runtime transformer optimization (includes LayerNorm fusion)
-    pipeline.add_pass(
-        ONNXRuntimeTransformerPass(),
-        config=PassConfig(
-            enabled=True,
-            params={
-                "embedding_dim": embedding_dim,
-                "num_heads": num_heads,
-                "input_shape": input_shape,
-            },
-        ),
-    )
+    # Add ONNX Runtime transformer optimization (includes LayerNorm fusion).
+    # Skipped for training-mode exports (see skip_ort_transformer docstring above).
+    if not skip_ort_transformer:
+        pipeline.add_pass(
+            ONNXRuntimeTransformerPass(),
+            config=PassConfig(
+                enabled=True,
+                params={
+                    "embedding_dim": embedding_dim,
+                    "num_heads": num_heads,
+                    "input_shape": input_shape,
+                },
+            ),
+        )
+        # Rename again after ONNX Runtime optimization
+        pipeline.add_pass(RenameNodesPass())
 
-    # Rename again after ONNX Runtime optimization
-    pipeline.add_pass(RenameNodesPass())
-
-    # Add standard inference optimizations
+    # Add standard inference optimizations.
+    # NOTE: SqueezeUnsqueezePass is intentionally omitted here.
+    # In opset 13, Squeeze/Unsqueeze 'axes' must be an input tensor, not an
+    # attribute. Converting to attribute format here would fail onnx.checker
+    # validation (which runs before generate_artifacts). The conversion is
+    # applied later by run_train_onnx_optimization on the final training graph.
     pipeline.add_pass(RemoveIdentityPass())
     pipeline.add_pass(ReshapeFusionPass())
     pipeline.add_pass(UnifyGemmPass())
     pipeline.add_pass(BiasGeluOptPass())
-    pipeline.add_pass(SqueezeUnsqueezePass())
     pipeline.add_pass(SumToAddPass())
-    pipeline.add_pass(SoftmaxAxisOptPass())
+    # SoftmaxAxisOptPass is skipped for training-mode exports: it inserts Reshape
+    # nodes with dynamic batch dim (-1) that cause ORT generate_artifacts() shape
+    # inference to fail ("inferred shape (-1) differs from existing shape (1)").
+    if not skip_ort_transformer:
+        pipeline.add_pass(SoftmaxAxisOptPass())
 
     return pipeline

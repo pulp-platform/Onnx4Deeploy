@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **MobileViT** model support (XXS, XS, S variants) - hybrid CNN-Transformer for mobile/edge
+- **TinyViT** model support - efficient hierarchical vision transformer
+
+### Changed
+- Optimized MobileViT ONNX export: replaced dynamic `view(-1,...)` with static `reshape(batch_size,...)`
+- Fixed dimension propagation in transformer blocks to eliminate Shape/Gather nodes
 
 ## [0.2.1] - 06.02.2026
 ### Changed
