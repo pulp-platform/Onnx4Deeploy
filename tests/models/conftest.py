@@ -120,6 +120,23 @@ def mobilenetv2_config():
 
 
 @pytest.fixture
+def mobilenetv2_training_config():
+    """MobileNetV2-0.35 training configuration (MLperf Tiny VWW).
+
+    Uses img_size=64 because img_size=32 collapses the final feature map to
+    1x1 which BatchNorm2d rejects in training mode.
+    """
+    return {
+        "batch_size": 1,
+        "img_size": 64,
+        "input_channels": 3,
+        "num_classes": 2,
+        "width_mult": 0.35,
+        "opset_version": 17,
+    }
+
+
+@pytest.fixture
 def dscnn_config():
     """Default DS-CNN-XS configuration for fast tests (MLperf Tiny KWS)."""
     return {
@@ -154,5 +171,51 @@ def autoencoder_config():
         "input_dim": 32,  # Reduced from 128 for speed
         "hidden_dims": [16, 8, 16],  # Reduced for speed
         "variant": "tiny",
+        "opset_version": 17,
+    }
+
+
+@pytest.fixture
+def simple_cnn_config():
+    """Default Simple CNN configuration for fast tests."""
+    return {
+        "batch_size": 1,
+        "input_channels": 1,
+        "input_height": 16,
+        "input_width": 16,
+        "hidden_channels": 16,
+        "num_classes": 10,
+        "opset_version": 17,
+    }
+
+
+@pytest.fixture
+def tiny_transformer_config():
+    """Default Tiny Transformer configuration for fast tests."""
+    return {
+        "batch_size": 1,
+        "img_size": 28,
+        "patch_size": 7,
+        "embed_dim": 32,
+        "ffn_hidden": 64,
+        "num_classes": 10,
+        "opset_version": 17,
+    }
+
+
+@pytest.fixture
+def sleep_convit_config():
+    """Default SleepConViT configuration (tests use library defaults).
+
+    SleepConViT's `num_patches`/`seq_len` are derived from ConvStem strides,
+    so we cannot freely shrink `input_length` without also updating those.
+    """
+    return {
+        "batch_size": 1,
+        "input_channels": 1,
+        "input_length": 3000,
+        "model_dim": 48,
+        "num_heads": 6,
+        "num_classes": 5,
         "opset_version": 17,
     }

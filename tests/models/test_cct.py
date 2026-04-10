@@ -5,7 +5,8 @@
 """
 Tests for CCT (Compact Convolutional Transformer) model export.
 
-Tests both inference and training mode exports.
+Tests both inference and training mode exports, including a canonical
+MLperf-style npz layout check.
 """
 
 import os
@@ -152,3 +153,25 @@ class TestCCTTraining:
         # which is expected behavior. The verify_training_export function
         # already performs validation with skip_shape_check=True.
         assert os.path.exists(onnx_file)
+
+    def test_cct_training_npz_layout(self, model_test_dir, cct_config):
+        """Test inputs.npz / outputs.npz are generated with the correct layout."""
+        n_batches = 4
+        exporter = CCTExporter(save_path=model_test_dir)
+        exporter._config_overrides = {
+            **cct_config,
+            "n_batches": n_batches,
+            "n_accum": 1,
+            "dataset": "random",
+        }
+        onnx_file = verify_training_export(exporter, model_test_dir)
+        output_dir = os.path.dirname(onnx_file)
+
+        npz_in = np.load(os.path.join(output_dir, "inputs.npz"), allow_pickle=True)
+        assert "meta_data_size" in npz_in, "inputs.npz missing meta_data_size"
+        assert "meta_n_batches" in npz_in, "inputs.npz missing meta_n_batches"
+        assert int(npz_in["meta_n_batches"].item()) == n_batches
+
+        npz_out = np.load(os.path.join(output_dir, "outputs.npz"), allow_pickle=True)
+        assert "loss" in npz_out, "outputs.npz missing loss"
+        assert len(npz_out["loss"]) == n_batches
