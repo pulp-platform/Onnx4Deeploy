@@ -268,14 +268,21 @@ class AutoencoderExporter(BaseONNXExporter):
                 )
 
                 if mb == 0:
-                    feed_mb0 = dict(feed)
+                    feed_mb0 = {k: v.copy() if hasattr(v, "copy") else v for k, v in feed.items()}
 
                 raw_outputs = session.run(None, feed)
                 outputs_raw = dict(zip(session_output_names, raw_outputs))
 
                 for out_name, out_val in outputs_raw.items():
-                    if "loss" in out_name.lower() and "grad" not in out_name.lower():
-                        all_losses.append(float(np.array(out_val).flatten()[0]))
+                    arr = np.array(out_val)
+                    is_loss_name = "loss" in out_name.lower() and "grad" not in out_name.lower()
+                    is_scalar_float = (
+                        arr.ndim == 0
+                        and np.issubdtype(arr.dtype, np.floating)
+                        and "accumulation" not in out_name
+                    )
+                    if is_loss_name or is_scalar_float:
+                        all_losses.append(float(arr.flatten()[0]))
                         break
 
                 for pname, grad_name in grad_tensor_map.items():
@@ -287,7 +294,7 @@ class AutoencoderExporter(BaseONNXExporter):
 
         outputs_dict: dict = {k: v for k, v in current_weights.items()}
         outputs_dict["loss"] = np.array(all_losses, dtype=np.float32)
-        print(f"   Reference losses: {all_losses}")
+        print(f"   Collected {len(all_losses)} reference losses: {all_losses}")
 
         final_model = onnx.load(self.paths["network"])
         final_input_names = [inp.name for inp in final_model.graph.input]
@@ -312,6 +319,7 @@ class AutoencoderExporter(BaseONNXExporter):
 
         save_dict["meta_data_size"] = np.array([effective_data_size], dtype=np.int32)
         save_dict["meta_n_batches"] = np.array([n_batches], dtype=np.int32)
+        save_dict["meta_n_accum"] = np.array([n_accum], dtype=np.int32)
         np.savez(save_dir / "inputs.npz", **save_dict)
 
         n_params = sum(1 for n in non_grad_names if n in init_map)

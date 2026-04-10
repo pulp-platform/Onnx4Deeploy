@@ -11,9 +11,7 @@ import numpy as np
 import torch
 
 from ..core.base_exporter import BaseONNXExporter
-
-# Use EpiDeNetDeploy: LayerNorm-based, no dropout, AvgPool — ONNX training compatible.
-from .pytorch_models.epidenet import EpiDeNetDeploy
+from .pytorch_models.epidenet import EpiDeNet
 
 
 class EpiDeNetExporter(BaseONNXExporter):
@@ -64,16 +62,12 @@ class EpiDeNetExporter(BaseONNXExporter):
 
     def create_model(self) -> torch.nn.Module:
         """
-        Create EpiDeNetDeploy PyTorch model.
-
-        EpiDeNetDeploy uses LayerNorm (instead of BatchNorm) and AvgPool
-        (instead of MaxPool), making it fully compatible with ONNX training
-        graph generation.
+        Create EpiDeNet PyTorch model.
 
         Returns:
-            EpiDeNetDeploy model ready for export
+            EpiDeNet model ready for export
         """
-        model = EpiDeNetDeploy(
+        model = EpiDeNet(
             C=self.model_config["channels"],
             T=self.model_config["time_steps"],
             output_classes=self.model_config["num_classes"],
@@ -101,7 +95,7 @@ class EpiDeNetExporter(BaseONNXExporter):
 
         Strategies:
         - "full":       Train everything — no frozen params (default, PULP-safe)
-        - "norm_only":  Freeze all conv weights; train LayerNorm affines + classifier
+        - "norm_only":  Freeze all conv weights; train BatchNorm affines + classifier
         - "last_layer": Freeze everything except the final classifier (fcn*)
         - "custom":     Explicit list from config["custom_trainable_params"]
 
@@ -313,7 +307,7 @@ class EpiDeNetExporter(BaseONNXExporter):
                         feed[name] = np.zeros(shape, dtype=np.float32)
 
                 if mb == 0:
-                    feed_mb0 = dict(feed)
+                    feed_mb0 = {k: v.copy() if hasattr(v, "copy") else v for k, v in feed.items()}
 
                 raw_outputs = session.run(None, feed)
                 outputs_raw = dict(zip(session_output_names, raw_outputs))
@@ -359,6 +353,7 @@ class EpiDeNetExporter(BaseONNXExporter):
 
         save_dict["meta_data_size"] = np.array([effective_data_size], dtype=np.int32)
         save_dict["meta_n_batches"] = np.array([n_batches], dtype=np.int32)
+        save_dict["meta_n_accum"] = np.array([n_accum], dtype=np.int32)
         np.savez(save_dir / "inputs.npz", **save_dict)
         n_params = sum(1 for n in non_grad_names if n in init_map)
         n_grad = len(grad_acc_names)

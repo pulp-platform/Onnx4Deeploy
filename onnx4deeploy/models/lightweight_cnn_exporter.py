@@ -283,7 +283,7 @@ class LightweightCnnExporter(BaseONNXExporter):
                     lazy_reset_grad=(accum_step == 0),
                 )
                 if mb == 0:
-                    feed_mb0 = dict(feed)
+                    feed_mb0 = {k: v.copy() if hasattr(v, "copy") else v for k, v in feed.items()}
                 raw_outputs = session.run(None, feed)
                 outputs_raw = dict(zip(session_output_names, raw_outputs))
                 for out_name, out_val in outputs_raw.items():
@@ -324,6 +324,7 @@ class LightweightCnnExporter(BaseONNXExporter):
 
         save_dict["meta_data_size"] = np.array([effective_data_size], dtype=np.int32)
         save_dict["meta_n_batches"] = np.array([n_batches], dtype=np.int32)
+        save_dict["meta_n_accum"] = np.array([n_accum], dtype=np.int32)
         np.savez(save_dir / "inputs.npz", **save_dict)
         print(
             f"   ✅ inputs.npz  — {len(non_grad_names)} base tensors "

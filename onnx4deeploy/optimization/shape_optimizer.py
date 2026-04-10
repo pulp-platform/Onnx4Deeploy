@@ -598,6 +598,14 @@ def infer_shapes_with_custom_ops(
     print("\n🔍 Running shape inference with custom op support...")
     model = onnx.load(model_path)
 
+    # Strip 'description' custom attributes — ORT shape inference rejects them on
+    # operators that don't declare this attribute in their schema (e.g. Size, Reshape).
+    for node in model.graph.node:
+        attrs_to_keep = [a for a in node.attribute if a.name != "description"]
+        if len(attrs_to_keep) != len(node.attribute):
+            del node.attribute[:]
+            node.attribute.extend(attrs_to_keep)
+
     # Check for Microsoft custom ops
     op_types = set(node.op_type for node in model.graph.node)
     microsoft_ops = [op for op in op_types if "com.microsoft" in op]
@@ -650,9 +658,16 @@ def infer_shapes_with_custom_ops(
             apply_custom_inference(inferred_model.graph, node)
 
     # Apply custom inference for ALL nodes (not just com.microsoft ones) to handle
-    # training-specific ops like ConcatTraining, SplitTraining, LayerNormalizationGrad
-    # that appear in backward-pass graphs.
-    all_custom_ops = {"ConcatTraining", "SplitTraining", "LayerNormalizationGrad"}
+    # training-specific ops like ConcatTraining, SplitTraining, LayerNormalizationGrad,
+    # BatchNormInternal, BatchNormalizationGrad that appear in backward-pass graphs.
+    all_custom_ops = {
+        "ConcatTraining",
+        "SplitTraining",
+        "LayerNormalizationGrad",
+        "BatchNormInternal",
+        "BatchNormalizationGrad",
+        "GlobalAveragePoolGrad",
+    }
     extra_nodes = [node for node in inferred_model.graph.node if node.op_type in all_custom_ops]
     if extra_nodes:
         print(f"  🔧 Applying custom shape inference for {len(extra_nodes)} training op(s)...")
@@ -780,6 +795,86 @@ def apply_custom_inference(graph: onnx.GraphProto, node: onnx.NodeProto) -> None
                                 set_tensor_shape(graph, out_name, src_shape)
                                 print(f"    SplitTraining output[{out_idx}] shape: {src_shape}")
                     break
+
+    elif op in ("BatchNormInternal", "com.microsoft.BatchNormInternal"):
+        # BatchNormInternal (ORT training-mode BN forward):
+        #   inputs:  X[N,C,H,W], gamma[C], beta[C], running_mean[C], running_var[C]
+        #   outputs: Y[N,C,H,W], updated_running_mean[C], updated_running_var[C],
+        #            saved_mean[C], saved_inv_std[C]
+        if len(node.input) >= 1 and len(node.output) >= 1:
+            x_shape = get_tensor_shape(graph, node.input[0])
+            if x_shape and len(x_shape) >= 2:
+                C = x_shape[1]
+                # outputs[0] = Y: same shape as X
+                out_y = node.output[0] if len(node.output) > 0 else ""
+                if out_y and not get_tensor_shape(graph, out_y):
+                    set_tensor_shape(graph, out_y, list(x_shape))
+                    print(f"    BatchNormInternal Y shape: {list(x_shape)}")
+                # outputs[1,2] = updated_running_mean/var: [C]
+                for out_idx in [1, 2]:
+                    out_name = node.output[out_idx] if out_idx < len(node.output) else ""
+                    if out_name and not get_tensor_shape(graph, out_name):
+                        set_tensor_shape(graph, out_name, [C])
+                        label = "updated_running_mean" if out_idx == 1 else "updated_running_var"
+                        print(f"    BatchNormInternal {label} shape: [{C}]")
+                # outputs[3,4] = saved_mean, saved_inv_std: [C]
+                for out_idx in [3, 4]:
+                    out_name = node.output[out_idx] if out_idx < len(node.output) else ""
+                    if out_name and not get_tensor_shape(graph, out_name):
+                        set_tensor_shape(graph, out_name, [C])
+                        label = "saved_mean" if out_idx == 3 else "saved_inv_std"
+                        print(f"    BatchNormInternal {label} shape: [{C}]")
+
+    elif op in ("BatchNormalizationGrad", "com.microsoft.BatchNormalizationGrad"):
+        # BatchNormalizationGrad (ORT BN backward):
+        #   inputs:  dY[N,C,H,W], X[N,C,H,W], gamma[C], saved_mean[C], saved_inv_std[C]
+        #   outputs: dX[N,C,H,W], dgamma[C], dbeta[C]
+        if len(node.input) >= 1 and len(node.output) >= 1:
+            dy_shape = get_tensor_shape(graph, node.input[0])
+            if dy_shape and len(dy_shape) >= 2:
+                C = dy_shape[1]
+                # output[0] = dX: same shape as dY
+                out_dx = node.output[0] if len(node.output) > 0 else ""
+                if out_dx and not get_tensor_shape(graph, out_dx):
+                    set_tensor_shape(graph, out_dx, list(dy_shape))
+                    print(f"    BatchNormalizationGrad dX shape: {list(dy_shape)}")
+                # outputs[1,2] = dgamma, dbeta: [C]
+                for out_idx in [1, 2]:
+                    out_name = node.output[out_idx] if out_idx < len(node.output) else ""
+                    if out_name and not get_tensor_shape(graph, out_name):
+                        set_tensor_shape(graph, out_name, [C])
+                        label = "dgamma" if out_idx == 1 else "dbeta"
+                        print(f"    BatchNormalizationGrad {label} shape: [{C}]")
+
+    elif op in ("Scale", "com.microsoft.Scale"):
+        # com.microsoft.Scale: element-wise scale (output = input * scalar).
+        # Output shape equals input[0] shape.
+        # NOTE: input[0] may be a scalar constant with dims=[], so use `is not None`
+        # rather than a truthiness check ([] is falsy but valid).
+        if len(node.input) >= 1 and len(node.output) >= 1:
+            out_name = node.output[0]
+            if out_name and get_tensor_shape(graph, out_name) is None:
+                input_shape = get_tensor_shape(graph, node.input[0])
+                if input_shape is not None:
+                    set_tensor_shape(graph, out_name, input_shape)
+                    print(f"    Scale output shape: {input_shape}")
+
+    elif op == "GlobalAveragePoolGrad":
+        # Fused GAP backward: dY[N,C,1,1] → dX[N,C,H,W]
+        # kernel_shape=[H,W] attribute carries the spatial size.
+        if len(node.input) >= 1 and len(node.output) >= 1:
+            out_name = node.output[0]
+            if out_name and not get_tensor_shape(graph, out_name):
+                dy_shape = get_tensor_shape(graph, node.input[0])
+                H, W = None, None
+                for attr in node.attribute:
+                    if attr.name == "kernel_shape" and len(attr.ints) == 2:
+                        H, W = int(attr.ints[0]), int(attr.ints[1])
+                if dy_shape and len(dy_shape) >= 2 and H is not None and W is not None:
+                    N, C = int(dy_shape[0]), int(dy_shape[1])
+                    dx_shape = [N, C, H, W]
+                    set_tensor_shape(graph, out_name, dx_shape)
+                    print(f"    GlobalAveragePoolGrad dX shape: {dx_shape}")
 
     elif node.domain == "com.microsoft" and "Grad" in op:
         # Generic handling for gradient ops (domain-safe check)
@@ -1071,24 +1166,23 @@ def set_tensor_shape(graph: onnx.GraphProto, tensor_name: str, shape: List[int])
         tensor_name: Name of tensor to set shape for
         shape: Shape dimensions
     """
-    value_info = get_value_info_by_name(graph, tensor_name)
-    if not value_info:
-        # Create new value_info
-        value_info = onnx.ValueInfoProto()
-        value_info.name = tensor_name
-        graph.value_info.append(value_info)
+    # Build a fresh, fully-typed ValueInfoProto using the ONNX helper so that
+    # the tensor_type oneof field is properly activated.  Then either replace
+    # the existing entry or append a new one.
+    new_vi = onnx.helper.make_tensor_value_info(
+        tensor_name,
+        onnx.TensorProto.FLOAT,  # default to float; shape is what matters here
+        shape,
+    )
 
-    # Clear existing shape
-    value_info.type.tensor_type.shape.Clear()
+    # Try to replace an existing entry in value_info
+    for i, vi in enumerate(graph.value_info):
+        if vi.name == tensor_name:
+            graph.value_info[i].CopyFrom(new_vi)
+            return
 
-    # Set new shape
-    for dim_value in shape:
-        dim = value_info.type.tensor_type.shape.dim.add()
-        if dim_value > 0:
-            dim.dim_value = dim_value
-        else:
-            # Dynamic dimension
-            dim.dim_param = "?"
+    # Not found — append a new entry
+    graph.value_info.append(new_vi)
 
 
 def get_tensor_shape(graph: onnx.GraphProto, tensor_name: str) -> Optional[List[int]]:

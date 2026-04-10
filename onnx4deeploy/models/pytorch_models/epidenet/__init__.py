@@ -2,6 +2,6 @@
 #
 # SPDX-License-Identifier: MIT
 
-from .epidenet import EpiDeNet, EpiDeNetDeploy, EpiDeNetInference
+from .epidenet import EpiDeNet, EpiDeNetInference
 
-__all__ = ["EpiDeNet", "EpiDeNetInference", "EpiDeNetDeploy"]
+__all__ = ["EpiDeNet", "EpiDeNetInference"]
