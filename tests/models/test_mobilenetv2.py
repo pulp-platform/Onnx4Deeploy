@@ -5,9 +5,12 @@
 """
 Tests for MobileNetV2 model export (MLperf Tiny Visual Wake Words benchmark).
 
-Tests inference mode export for MobileNetV2-0.35.
+Tests inference and training mode exports for MobileNetV2-0.35.
 """
 
+import os
+
+import numpy as np
 import pytest
 
 from onnx4deeploy.models.mobilenetv2_exporter import MobileNetV2Exporter
@@ -17,6 +20,7 @@ from .test_utils import (
     verify_inference_export,
     verify_onnxruntime_compatibility,
     verify_trainable_params,
+    verify_training_export,
 )
 
 
@@ -91,3 +95,57 @@ class TestMobileNetV2Inference:
         assert all(
             "classifier" in p for p in trainable
         ), "last_layer should only include classifier params"
+
+
+@pytest.mark.training
+class TestMobileNetV2Training:
+    """Test MobileNetV2 model training mode export."""
+
+    def test_mobilenetv2_training_export(self, model_test_dir, mobilenetv2_training_config):
+        """Test MobileNetV2 training export with random data (fast smoke test)."""
+        exporter = MobileNetV2Exporter(save_path=model_test_dir)
+        exporter._config_overrides = {
+            **mobilenetv2_training_config,
+            "n_batches": 4,
+            "n_accum": 1,
+            "dataset": "random",
+        }
+        onnx_file = verify_training_export(exporter, model_test_dir)
+        assert os.path.exists(onnx_file)
+
+    def test_mobilenetv2_training_artifacts(self, model_test_dir, mobilenetv2_training_config):
+        """Test MobileNetV2 training artifacts generation."""
+        exporter = MobileNetV2Exporter(save_path=model_test_dir)
+        exporter._config_overrides = {
+            **mobilenetv2_training_config,
+            "n_batches": 4,
+            "n_accum": 1,
+            "dataset": "random",
+        }
+        verify_training_export(
+            exporter,
+            model_test_dir,
+            required_artifacts=["checkpoint", "optimizer_model.onnx", "eval_model.onnx"],
+        )
+
+    def test_mobilenetv2_training_npz_layout(self, model_test_dir, mobilenetv2_training_config):
+        """Test inputs.npz / outputs.npz are generated with the correct layout."""
+        n_batches = 4
+        exporter = MobileNetV2Exporter(save_path=model_test_dir)
+        exporter._config_overrides = {
+            **mobilenetv2_training_config,
+            "n_batches": n_batches,
+            "n_accum": 1,
+            "dataset": "random",
+        }
+        onnx_file = verify_training_export(exporter, model_test_dir)
+        output_dir = os.path.dirname(onnx_file)
+
+        npz_in = np.load(os.path.join(output_dir, "inputs.npz"), allow_pickle=True)
+        assert "meta_data_size" in npz_in, "inputs.npz missing meta_data_size"
+        assert "meta_n_batches" in npz_in, "inputs.npz missing meta_n_batches"
+        assert int(npz_in["meta_n_batches"].item()) == n_batches
+
+        npz_out = np.load(os.path.join(output_dir, "outputs.npz"), allow_pickle=True)
+        assert "loss" in npz_out, "outputs.npz missing loss"
+        assert len(npz_out["loss"]) == n_batches

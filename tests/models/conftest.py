@@ -120,6 +120,23 @@ def mobilenetv2_config():
 
 
 @pytest.fixture
+def mobilenetv2_training_config():
+    """MobileNetV2-0.35 training configuration (MLperf Tiny VWW).
+
+    Uses img_size=64 because img_size=32 collapses the final feature map to
+    1x1 which BatchNorm2d rejects in training mode.
+    """
+    return {
+        "batch_size": 1,
+        "img_size": 64,
+        "input_channels": 3,
+        "num_classes": 2,
+        "width_mult": 0.35,
+        "opset_version": 17,
+    }
+
+
+@pytest.fixture
 def dscnn_config():
     """Default DS-CNN-XS configuration for fast tests (MLperf Tiny KWS)."""
     return {
