@@ -219,19 +219,3 @@ def sleep_convit_config():
         "num_classes": 5,
         "opset_version": 17,
     }
-
-
-@pytest.fixture
-def mamba_config():
-    """Minimal Mamba configuration for fast tests (inference only)."""
-    return {
-        "batch_size": 1,
-        "d_model": 32,
-        "n_layers": 2,
-        "d_state": 8,
-        "d_conv": 4,
-        "expand_factor": 2,
-        "max_seq_len": 64,
-        "num_classes": 5,
-        "opset_version": 17,
-    }

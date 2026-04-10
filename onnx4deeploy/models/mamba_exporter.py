@@ -58,10 +58,6 @@ class MambaExporter(BaseONNXExporter):
             "training_strategy": "full",  # Options: "full", "last_layer", "custom"
             "custom_trainable_params": [],
         }
-
-        if hasattr(self, "_config_overrides") and self._config_overrides:
-            config.update(self._config_overrides)
-
         return config
 
     def create_model(self) -> torch.nn.Module:
