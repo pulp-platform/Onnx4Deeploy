@@ -14,11 +14,7 @@ import pytest
 
 from onnx4deeploy.models.mamba_exporter import MambaExporter
 
-from .test_utils import (
-    load_and_check_onnx_model,
-    verify_trainable_params,
-    verifyonnx_file_exists,
-)
+from .test_utils import load_and_check_onnx_model, verify_trainable_params, verifyonnx_file_exists
 
 
 @pytest.mark.inference
@@ -47,9 +43,7 @@ class TestMambaInference:
         onnx_file = exporter.export(mode="infer")
         model = onnx.load(onnx_file)
 
-        input_shape = [
-            dim.dim_value for dim in model.graph.input[0].type.tensor_type.shape.dim
-        ]
+        input_shape = [dim.dim_value for dim in model.graph.input[0].type.tensor_type.shape.dim]
         expected = [
             mamba_config["batch_size"],
             mamba_config["max_seq_len"],

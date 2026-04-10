@@ -49,9 +49,7 @@ class TestTinyTransformerInference:
             expected_output_classes=tiny_transformer_config["num_classes"],
         )
 
-    def test_tiny_transformer_inference_correctness(
-        self, model_test_dir, tiny_transformer_config
-    ):
+    def test_tiny_transformer_inference_correctness(self, model_test_dir, tiny_transformer_config):
         """Test Tiny Transformer inference output correctness."""
         torch.manual_seed(42)
         np.random.seed(42)
@@ -74,9 +72,7 @@ class TestTinyTransformerInference:
 
         assert onnx_output.shape == torch_output.numpy().shape
 
-    def test_tiny_transformer_onnxruntime_inference(
-        self, model_test_dir, tiny_transformer_config
-    ):
+    def test_tiny_transformer_onnxruntime_inference(self, model_test_dir, tiny_transformer_config):
         """Test exported Tiny Transformer model runs with ONNX Runtime."""
         exporter = TinyTransformerExporter(save_path=model_test_dir)
         exporter._config_overrides = {k: v for k, v in tiny_transformer_config.items()}
@@ -108,9 +104,7 @@ class TestTinyTransformerTraining:
         onnx_file = verify_training_export(exporter, model_test_dir)
         assert os.path.exists(onnx_file)
 
-    def test_tiny_transformer_training_artifacts(
-        self, model_test_dir, tiny_transformer_config
-    ):
+    def test_tiny_transformer_training_artifacts(self, model_test_dir, tiny_transformer_config):
         """Test Tiny Transformer training artifacts generation."""
         exporter = TinyTransformerExporter(save_path=model_test_dir)
         exporter._config_overrides = {
@@ -125,9 +119,7 @@ class TestTinyTransformerTraining:
             required_artifacts=["checkpoint", "optimizer_model.onnx", "eval_model.onnx"],
         )
 
-    def test_tiny_transformer_trainable_params(
-        self, model_test_dir, tiny_transformer_config
-    ):
+    def test_tiny_transformer_trainable_params(self, model_test_dir, tiny_transformer_config):
         """Test Tiny Transformer trainable parameters identification."""
         exporter = TinyTransformerExporter(save_path=model_test_dir)
         exporter._config_overrides = {k: v for k, v in tiny_transformer_config.items()}
