@@ -156,3 +156,91 @@ def autoencoder_config():
         "variant": "tiny",
         "opset_version": 17,
     }
+
+
+@pytest.fixture
+def simple_cnn_config():
+    """Default Simple CNN configuration for fast tests."""
+    return {
+        "batch_size": 1,
+        "input_channels": 1,
+        "input_height": 16,
+        "input_width": 16,
+        "hidden_channels": 16,
+        "num_classes": 10,
+        "opset_version": 17,
+    }
+
+
+@pytest.fixture
+def tiny_transformer_config():
+    """Default Tiny Transformer configuration for fast tests."""
+    return {
+        "batch_size": 1,
+        "img_size": 28,
+        "patch_size": 7,
+        "embed_dim": 32,
+        "ffn_hidden": 64,
+        "num_classes": 10,
+        "opset_version": 17,
+    }
+
+
+@pytest.fixture
+def sleep_convit_config():
+    """Default SleepConViT configuration (tests use library defaults).
+
+    SleepConViT's `num_patches`/`seq_len` are derived from ConvStem strides,
+    so we cannot freely shrink `input_length` without also updating those.
+    """
+    return {
+        "batch_size": 1,
+        "input_channels": 1,
+        "input_length": 3000,
+        "model_dim": 48,
+        "num_heads": 6,
+        "num_classes": 5,
+        "opset_version": 17,
+    }
+
+
+@pytest.fixture
+def tinyvit_config():
+    """Minimal TinyViT configuration for fast tests."""
+    return {
+        "batch_size": 1,
+        "img_size": 32,
+        "input_channels": 3,
+        "num_classes": 5,
+        "variant": "tiny_vit_5m",
+        "opset_version": 17,
+    }
+
+
+@pytest.fixture
+def mobilevit_config():
+    """Minimal MobileViT configuration for fast tests (XXS variant)."""
+    return {
+        "batch_size": 1,
+        "img_size": 64,
+        "input_channels": 3,
+        "num_classes": 5,
+        "variant": "mobile_vit_xxs",
+        "opset_version": 17,
+    }
+
+
+@pytest.fixture
+def mamba_config():
+    """Minimal Mamba configuration for fast tests (inference only)."""
+    return {
+        "batch_size": 1,
+        "d_model": 32,
+        "n_layers": 2,
+        "d_state": 8,
+        "d_conv": 4,
+        "expand_factor": 2,
+        "max_seq_len": 64,
+        "num_classes": 5,
+        "opset_version": 17,
+    }

@@ -50,6 +50,9 @@ class TinyViTExporter(BaseONNXExporter):
             "custom_trainable_params": [],
         }
 
+        if hasattr(self, "_config_overrides") and self._config_overrides:
+            config.update(self._config_overrides)
+
         self.model_config = config
         return config
 
