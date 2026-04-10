@@ -222,32 +222,6 @@ def sleep_convit_config():
 
 
 @pytest.fixture
-def tinyvit_config():
-    """Minimal TinyViT configuration for fast tests."""
-    return {
-        "batch_size": 1,
-        "img_size": 32,
-        "input_channels": 3,
-        "num_classes": 5,
-        "variant": "tiny_vit_5m",
-        "opset_version": 17,
-    }
-
-
-@pytest.fixture
-def mobilevit_config():
-    """Minimal MobileViT configuration for fast tests (XXS variant)."""
-    return {
-        "batch_size": 1,
-        "img_size": 64,
-        "input_channels": 3,
-        "num_classes": 5,
-        "variant": "mobile_vit_xxs",
-        "opset_version": 17,
-    }
-
-
-@pytest.fixture
 def mamba_config():
     """Minimal Mamba configuration for fast tests (inference only)."""
     return {
