@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="docs/assets/logo.png" alt="Onnx4Deeploy logo" width="200">
+</p>
+
 # Onnx4Deeploy
 
 [![CI](https://github.com/pulp-platform/Onnx4Deeploy/workflows/CI/badge.svg)](https://github.com/pulp-platform/Onnx4Deeploy/actions)
