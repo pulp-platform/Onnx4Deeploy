@@ -107,6 +107,8 @@ markers = [
     "baseline: tests that require baseline comparison",
     "inference: marks tests for inference mode",
     "training: marks tests for training mode",
+    "quantized: marks tests for quantized models",
+    "zo: marks tests for zeroth-order perturbation",
 ]
 
 [tool.isort]
