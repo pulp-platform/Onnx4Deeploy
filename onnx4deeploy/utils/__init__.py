@@ -5,6 +5,7 @@
 """Utility functions for ONNX model manipulation."""
 
 from .node_naming import make_c_name, rename_and_save_onnx, rename_nodes, rename_onnx_nodes
+from .onnx_node_implementations import run_onnx_graph
 
 __all__ = [
     "make_c_name",

@@ -672,48 +672,51 @@ class BaseONNXExporter(ABC):
         """
         Create test input/output data for training.
 
-        Uses ONNX Runtime to generate reference output from the (potentially randomized) ONNX model.
-        This ensures test data matches the actual ONNX model weights.
+        For standard inference mode, uses ONNX Runtime to generate reference
+        output.  For modes that involve custom ops (q-infer, zo-train,
+        q-zo-train) the pure-Python ``run_onnx_graph`` executor is used instead
+        so that Quant/Dequant/RequantShift and MeZO perturbation nodes can be
+        executed without a custom-op shared library.
         """
-        # Generate test data using ONNX Runtime
         try:
             from pathlib import Path
 
             import numpy as np
-            import onnxruntime as ort
 
             print("💾 Generating test input/output data from ONNX model...")
 
-            # Create test input
             input_shape = self.get_input_shape()
             test_input = np.random.randn(*input_shape).astype(np.float32)
-            from onnxruntime_extensions import onnx_op, PyOp, get_library_path
-            from DeepQuant.QuantDequantOnnx import requant_shift_onnx
-            sess_options = ort.SessionOptions()
 
-            sess_options.register_custom_ops_library(get_library_path())
+            use_pure_python = quant or (mode == ExportMode.ZO_TRAINING)
 
-            
-            if not quant:            
-                session = ort.InferenceSession(self.paths["network_infer"],
-                                            sess_options=sess_options)
-                input_names = [i.name for i in session.get_inputs()]
-
+            if use_pure_python:
+                from onnx4deeploy.utils.onnx_node_implementations import run_onnx_graph
+                print("   Using pure-Python ONNX executor (custom ops present)...")
+                test_output = run_onnx_graph(
+                    self.paths["network_infer"], {"input": test_input}
+                )
+                if not isinstance(test_output, np.ndarray):
+                    test_output = np.array(test_output, dtype=np.float32)
+            else:
+                import onnxruntime as ort
+                from onnxruntime_extensions import get_library_path
+                sess_options = ort.SessionOptions()
+                sess_options.register_custom_ops_library(get_library_path())
+                session = ort.InferenceSession(
+                    self.paths["network_infer"], sess_options=sess_options
+                )
                 input_name = session.get_inputs()[0].name
                 test_output = session.run(None, {input_name: test_input})[0]
-                
-                
-            # Workaround onnx Inference session for now
-            else:
-                test_output = np.random.randn(input_shape[0], self.config["num_classes"]).astype(np.float32)
-            
 
             # Save as .npz files
             save_path = Path(self.paths["output_dir"])
             save_path.mkdir(parents=True, exist_ok=True)
 
             if mode == ExportMode.ZO_TRAINING:
-                test_label = np.random.randint(0, self.config["num_classes"], size=(input_shape[0],1)).astype(np.int8)
+                test_label = np.random.randint(
+                    0, self.config["num_classes"], size=(input_shape[0], 1)
+                ).astype(np.int8)
                 print(f"   Generated test labels with shape: {test_label.shape}")
                 np.savez(save_path / "inputs.npz", input=test_input, label=test_label)
             else:
