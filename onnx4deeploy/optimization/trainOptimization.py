@@ -2237,8 +2237,28 @@ def convert_sum_to_add(input_model_path, output_model_path):
     # Load the model
     model = onnx.load(input_model_path)
 
+    # Build a name → (elem_type, shape) lookup so we can stamp value_info onto
+    # the new intermediate tensors emitted when an N-ary Sum is split into a
+    # chain of binary Adds. Without this Deeploy's front-end shape assertion
+    # fails with "Found tensors with missing shape annotation:
+    # <Sum_node>_intermediate_<j>" — surfaces whenever a gradient feed-point
+    # has more than 3 contributors (e.g. LoRA adapters add 3 extra branches
+    # per Q/K/V on the attention input).
+    shape_lookup: dict = {}
+    for source in (model.graph.input, model.graph.output, model.graph.value_info):
+        for vi in source:
+            if vi.type.tensor_type.HasField("shape"):
+                dims = [
+                    d.dim_value if d.HasField("dim_value") else 0
+                    for d in vi.type.tensor_type.shape.dim
+                ]
+                shape_lookup[vi.name] = (vi.type.tensor_type.elem_type, dims)
+    for init in model.graph.initializer:
+        shape_lookup[init.name] = (init.data_type, list(init.dims))
+
     # Track necessary changes
     new_nodes = []
+    new_value_info = []
     processed_nodes = set()
 
     # Process each node in the graph
@@ -2276,6 +2296,15 @@ def convert_sum_to_add(input_model_path, output_model_path):
                 # We'll create intermediate outputs for all but the last Add
                 intermediate_outputs = []
 
+                # Adds are element-wise: every intermediate has the same
+                # dtype/shape as the inputs we know about.
+                inferred_dtype = None
+                inferred_shape = None
+                for inp in node.input:
+                    if inp in shape_lookup:
+                        inferred_dtype, inferred_shape = shape_lookup[inp]
+                        break
+
                 for j in range(input_count - 1):
                     if j == 0:
                         # First Add takes the first two inputs of Sum
@@ -2292,6 +2321,13 @@ def convert_sum_to_add(input_model_path, output_model_path):
                     else:
                         output = f"{node.name}_intermediate_{j}"
                         intermediate_outputs.append(output)
+                        if inferred_dtype is not None and inferred_shape is not None:
+                            new_value_info.append(
+                                helper.make_tensor_value_info(
+                                    output, inferred_dtype, inferred_shape
+                                )
+                            )
+                            shape_lookup[output] = (inferred_dtype, inferred_shape)
 
                     # Create the Add node
                     add_node = helper.make_node(
@@ -2315,7 +2351,7 @@ def convert_sum_to_add(input_model_path, output_model_path):
         inputs=model.graph.input,
         outputs=model.graph.output,
         initializer=model.graph.initializer,
-        value_info=model.graph.value_info,
+        value_info=list(model.graph.value_info) + new_value_info,
     )
 
     # Create a new model with the updated graph

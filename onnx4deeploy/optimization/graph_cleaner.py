@@ -1046,3 +1046,105 @@ def canonicalize_ms_training_ops_file(input_path: str, output_path: str) -> None
     model = onnx.load(input_path)
     model = canonicalize_ms_training_ops(model)
     onnx.save(model, output_path)
+
+
+def duplicate_constant_fed_transposes(input_path: str, output_path: str) -> None:
+    """
+    Deeploy's lowering folds chains like (Constant -> Transpose) or
+    (Constant -> Reshape) into a single Constant; if the folded output has more
+    than one consumer it trips DeeployTypes.hoistConstant's
+    `len(constant.outputs) <= 1` assertion.
+
+    Triggered by LoRA: frozen weights become Constants and the same shape-op
+    output is consumed by both forward MatMul and backward Gemm. To make
+    Deeploy's per-consumer fold safe, we duplicate any op whose inputs are all
+    constants (Constant-node outputs or graph initializers) and whose output
+    has >1 consumer — once per consumer.
+    """
+    model = onnx.load(input_path)
+    g = model.graph
+
+    constant_outputs = {o for n in g.node if n.op_type == "Constant" for o in n.output}
+    initializer_names = {i.name for i in g.initializer}
+    constant_sources = constant_outputs | initializer_names
+
+    consumers = {}
+    for n in g.node:
+        for inp in n.input:
+            consumers.setdefault(inp, []).append(n)
+
+    new_nodes = []
+    rewrites = 0
+    new_dup_outputs = set()
+    for n in g.node:
+        if n.op_type == "Constant":
+            new_nodes.append(n)
+            continue
+        if (
+            len(n.output) == 1
+            and len(consumers.get(n.output[0], [])) > 1
+            and all(inp in constant_sources for inp in n.input if inp != "")
+        ):
+            base_out = n.output[0]
+            users = consumers[base_out]
+            for k, user in enumerate(users):
+                new_out = base_out if k == 0 else f"{base_out}_dup{k}"
+                dup = helper.make_node(
+                    n.op_type,
+                    inputs=list(n.input),
+                    outputs=[new_out],
+                    name=f"{n.name}_dup{k}" if k > 0 else n.name,
+                )
+                for attr in n.attribute:
+                    dup.attribute.append(attr)
+                if dup.HasField("domain") or n.domain:
+                    dup.domain = n.domain
+                new_nodes.append(dup)
+                if k > 0:
+                    new_dup_outputs.add(new_out)
+                    for i, inp in enumerate(user.input):
+                        if inp == base_out:
+                            user.input[i] = new_out
+                            break
+            rewrites += 1
+        else:
+            new_nodes.append(n)
+
+    if rewrites:
+        new_vis = list(g.value_info)
+        existing_vi = {vi.name for vi in g.value_info}
+        base_vi_index = {vi.name: vi for vi in g.value_info}
+        for o in new_dup_outputs:
+            if o in existing_vi:
+                continue
+            base = o.rsplit("_dup", 1)[0]
+            base_vi = base_vi_index.get(base)
+            if base_vi is None:
+                continue
+            vi = onnx.ValueInfoProto()
+            vi.CopyFrom(base_vi)
+            vi.name = o
+            new_vis.append(vi)
+            existing_vi.add(o)
+
+        new_graph = helper.make_graph(
+            nodes=new_nodes,
+            name=g.name,
+            inputs=g.input,
+            outputs=g.output,
+            initializer=g.initializer,
+            value_info=new_vis,
+        )
+        new_model = helper.make_model(
+            new_graph,
+            producer_name="DuplicateConstantFedNodes",
+            opset_imports=model.opset_import,
+            ir_version=model.ir_version,
+        )
+        new_model.metadata_props.extend(model.metadata_props)
+        for d in model.domain:
+            new_model.domain.append(d)
+        onnx.save(new_model, output_path)
+        print(f"Duplicated {rewrites} Constant-fed multi-consumer node(s)")
+    else:
+        onnx.save(model, output_path)

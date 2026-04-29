@@ -61,6 +61,14 @@ class TinyTransformerMnist(nn.Module):
         embed_dim:   Token embedding dimension (default: 32).
         ffn_hidden:  Hidden dimension of the feed-forward block (default: 64).
         num_classes: Number of output classes (default: 10 for MNIST).
+        use_lora:    If True, attach LoRA A/B adapters to the attention projections
+                     (q/k/v/out_proj). The base projection weights are kept; the
+                     forward path adds (x · A · B) * (alpha / r). With B initialised
+                     to zero the initial output equals the non-LoRA model, so the
+                     graph is functionally identical at step 0 and only the A/B
+                     parameters need gradients during fine-tuning.
+        lora_r:      LoRA rank (default: 4).
+        lora_alpha:  LoRA scaling numerator; effective scale = alpha / r (default: 16).
     """
 
     def __init__(
@@ -70,6 +78,9 @@ class TinyTransformerMnist(nn.Module):
         embed_dim: int = 32,
         ffn_hidden: int = 64,
         num_classes: int = 10,
+        use_lora: bool = False,
+        lora_r: int = 4,
+        lora_alpha: int = 16,
     ):
         super().__init__()
 
@@ -100,6 +111,31 @@ class TinyTransformerMnist(nn.Module):
         # Classification head
         self.classifier = nn.Linear(embed_dim, num_classes, bias=False)
 
+        # ── Optional LoRA adapters on the attention block ──────────────────
+        # Shapes are stored already-transposed so the forward path is
+        #   x @ A @ B   (not x @ A.t() @ B.t())
+        # which avoids any perm=[1,0] Transpose nodes in the exported graph.
+        #   A: (D, r)   B: (r, D)
+        self.use_lora = use_lora
+        if use_lora:
+            self.lora_r = lora_r
+            self.lora_alpha = lora_alpha
+            self.lora_scaling = lora_alpha / lora_r
+
+            self.lora_q_A = nn.Parameter(torch.zeros(embed_dim, lora_r))
+            self.lora_q_B = nn.Parameter(torch.zeros(lora_r, embed_dim))
+            self.lora_k_A = nn.Parameter(torch.zeros(embed_dim, lora_r))
+            self.lora_k_B = nn.Parameter(torch.zeros(lora_r, embed_dim))
+            self.lora_v_A = nn.Parameter(torch.zeros(embed_dim, lora_r))
+            self.lora_v_B = nn.Parameter(torch.zeros(lora_r, embed_dim))
+            self.lora_out_A = nn.Parameter(torch.zeros(embed_dim, lora_r))
+            self.lora_out_B = nn.Parameter(torch.zeros(lora_r, embed_dim))
+
+            # Standard LoRA init: A ~ kaiming_uniform, B = 0 → initial delta is 0
+            for A in (self.lora_q_A, self.lora_k_A, self.lora_v_A, self.lora_out_A):
+                nn.init.kaiming_uniform_(A, a=math.sqrt(5))
+            # B already zeros
+
     # ------------------------------------------------------------------
     # Helper: apply an nn.Linear to a 3-D tensor via 2-D reshape.
     # ONNX export: Reshape → Gemm(transB=1) → Reshape  (no Transpose node)
@@ -116,6 +152,21 @@ class TinyTransformerMnist(nn.Module):
         """
         B, S, D = x.shape
         return linear(x.reshape(B * S, D)).reshape(B, S, -1)
+
+    # ------------------------------------------------------------------
+    # Helper: LoRA delta path applied to a (B, S, D) tensor via 2-D reshape.
+    # A is stored as (D_in, r) and B as (r, D_out) so the forward is
+    #   (x_2d @ A) @ B * scaling
+    # which produces only 2-D MatMul nodes — no perm=[1,0] Transpose, matching
+    # the same export-friendly pattern used by _lin3d above.
+    # ------------------------------------------------------------------
+
+    @staticmethod
+    def _lora3d(x: torch.Tensor, A: torch.Tensor, B: torch.Tensor, scaling: float) -> torch.Tensor:
+        B_, S, D = x.shape
+        x2d = x.reshape(B_ * S, D)
+        out2d = (x2d @ A) @ B
+        return out2d.reshape(B_, S, -1) * scaling
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -141,15 +192,23 @@ class TinyTransformerMnist(nn.Module):
         k = self._lin3d(x, self.k_proj)  # (B, S, D)
         v = self._lin3d(x, self.v_proj)  # (B, S, D)
 
+        # LoRA delta on Q/K/V — same export-friendly Reshape→2-D MatMul→Reshape pattern
+        if self.use_lora:
+            q = q + self._lora3d(x, self.lora_q_A, self.lora_q_B, self.lora_scaling)
+            k = k + self._lora3d(x, self.lora_k_A, self.lora_k_B, self.lora_scaling)
+            v = v + self._lora3d(x, self.lora_v_A, self.lora_v_B, self.lora_scaling)
+
         # Attention scores: (B, S, D) × (B, D, S) → (B, S, S)
         # k.transpose(1, 2) → perm=[0,2,1] on 3-D tensor — correct in Deeploy
         attn = torch.bmm(q, k.transpose(1, 2)) * self.inv_scale
         attn = F.softmax(attn, dim=-1)  # (B, S, S)
 
         # Context: (B, S, S) × (B, S, D) → (B, S, D)
-        x = torch.bmm(attn, v)
-        x = self._lin3d(x, self.out_proj)  # (B, S, D)
-        x = x + residual
+        ctx = torch.bmm(attn, v)
+        x_out = self._lin3d(ctx, self.out_proj)  # (B, S, D)
+        if self.use_lora:
+            x_out = x_out + self._lora3d(ctx, self.lora_out_A, self.lora_out_B, self.lora_scaling)
+        x = x_out + residual
 
         # ── Feed-forward block (pre-norm, residual) ─────────────────────────
         residual = x

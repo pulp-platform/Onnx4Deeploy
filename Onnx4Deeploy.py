@@ -367,15 +367,24 @@ def generate_model(
     data_size: Optional[int] = None,
     learning_rate: Optional[float] = None,
     classes: Optional[List[int]] = None,
+    use_lora: bool = False,
+    lora_r: Optional[int] = None,
+    lora_alpha: Optional[int] = None,
+    training_strategy: Optional[str] = None,
 ):
     """Generate model ONNX"""
     print(f"\n{'='*70}")
     print(f"🚀 Generating model: {model_name} ({mode.upper()} mode)")
     print(f"{'='*70}\n")
 
-    # Set default output path if not specified
+    # Set default output path if not specified.
+    # LoRA exports get a "_lora" tag in the directory name so they don't collide
+    # with the corresponding non-LoRA training export (e.g. cct_lora_train vs cct_train).
     if output_path is None:
-        output_path = str(project_root / "onnx" / "model" / f"{model_name.lower()}_{mode}")
+        lora_tag = "_lora" if use_lora else ""
+        output_path = str(
+            project_root / "onnx" / "model" / f"{model_name.lower()}{lora_tag}_{mode}"
+        )
         print(f"📁 Using default output path: {output_path}\n")
 
     # Get model class
@@ -447,6 +456,20 @@ def generate_model(
             exporter._config_overrides["data_size"] = data_size
         if classes is not None:
             exporter._config_overrides["classes"] = classes
+        # LoRA fine-tuning toggles (only models with LoRA support read these:
+        # currently TinyTransformer and CCT). Unrelated exporters silently ignore them.
+        # --use-lora alone implies training_strategy="lora" (the common case);
+        # explicitly passing --training-strategy still wins.
+        if use_lora:
+            exporter._config_overrides["use_lora"] = True
+            if training_strategy is None:
+                training_strategy = "lora"
+        if lora_r is not None:
+            exporter._config_overrides["lora_r"] = lora_r
+        if lora_alpha is not None:
+            exporter._config_overrides["lora_alpha"] = lora_alpha
+        if training_strategy is not None:
+            exporter._config_overrides["training_strategy"] = training_strategy
 
         # Apply model-specific configuration via _config_overrides so it survives
         # the internal load_config() call inside export_inference/export_training().
@@ -705,6 +728,45 @@ Examples:
         help="(mnist) Restrict training to specific digit classes. "
         "Example: --classes 0 8  trains a binary 0-vs-8 classifier.",
     )
+    parser.add_argument(
+        "--training-strategy",
+        type=str,
+        default=None,
+        dest="training_strategy",
+        metavar="STRATEGY",
+        help="(train mode) Override the exporter's default training strategy "
+        "(controls which parameters are trainable). "
+        "TinyTransformer: full | head | custom | lora.  "
+        "CCT: no_tokenizer | last_block | linear | full | custom | lora. "
+        "Use 'lora' together with --use-lora to fine-tune only the LoRA adapters.",
+    )
+    parser.add_argument(
+        "--use-lora",
+        action="store_true",
+        dest="use_lora",
+        help="(train mode, TinyTransformer & CCT) Attach LoRA A/B adapters to the "
+        "attention block (q/k/v[/out|proj]) AND default training_strategy to 'lora' "
+        "so only the LoRA adapters get gradients. Pass --training-strategy explicitly "
+        "to override (e.g. '--use-lora --training-strategy full' for LoRA-augmented "
+        "full fine-tuning).",
+    )
+    parser.add_argument(
+        "--lora-r",
+        type=int,
+        default=None,
+        dest="lora_r",
+        metavar="R",
+        help="(train mode, --use-lora) LoRA rank. Default: 4.",
+    )
+    parser.add_argument(
+        "--lora-alpha",
+        type=int,
+        default=None,
+        dest="lora_alpha",
+        metavar="A",
+        help="(train mode, --use-lora) LoRA scaling numerator; effective scale = alpha / r. "
+        "Default: 16.",
+    )
 
     # Other options
     parser.add_argument("--examples", action="store_true", help="Show usage examples")
@@ -765,6 +827,10 @@ Examples:
             data_size=args.data_size,
             learning_rate=args.learning_rate,
             classes=args.classes,
+            use_lora=args.use_lora,
+            lora_r=args.lora_r,
+            lora_alpha=args.lora_alpha,
+            training_strategy=args.training_strategy,
         )
 
 

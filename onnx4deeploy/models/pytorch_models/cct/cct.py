@@ -44,6 +44,9 @@ class CCT(nn.Module):
         mlp_ratio=4.0,
         num_classes=1000,
         positional_embedding="learnable",
+        use_lora: bool = False,
+        lora_r: int = 4,
+        lora_alpha: int = 16,
         *args,
         **kwargs,
     ):
@@ -78,6 +81,9 @@ class CCT(nn.Module):
             mlp_ratio=mlp_ratio,
             num_classes=num_classes,
             positional_embedding=positional_embedding,
+            use_lora=use_lora,
+            lora_r=lora_r,
+            lora_alpha=lora_alpha,
         )
 
     def forward(self, x):

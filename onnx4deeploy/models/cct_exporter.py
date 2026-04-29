@@ -51,8 +51,15 @@ class CCTExporter(BaseONNXExporter):
             "kernel_size": 3,
             "positional_embedding": "learnable",
             # Training configuration
-            "training_strategy": "no_tokenizer",  # Options: "no_tokenizer", "last_block", "linear", "full", "custom"
+            "training_strategy": "no_tokenizer",  # Options: "no_tokenizer", "last_block", "linear", "full", "custom", "lora"
             "custom_trainable_params": [],  # Used when training_strategy = "custom"
+            # LoRA fine-tuning — when use_lora=True the attention block is built
+            # with AttentionwLora, which adds low-rank A/B adapters on q/k/v/proj.
+            # Pair with training_strategy="lora" to freeze every base weight at
+            # export time so ORT's backward graph contains only LoRA gradients.
+            "use_lora": False,
+            "lora_r": 4,
+            "lora_alpha": 16,
             # Training loop configuration
             "learning_rate": 0.001,
             "n_batches": 4,
@@ -87,6 +94,9 @@ class CCTExporter(BaseONNXExporter):
             stochastic_depth=0.0,  # Disable DropPath: no RandomUniformLike in ONNX
             dropout=0.0,  # Disable Dropout: no Dropout op in ONNX
             attention_dropout=0.0,  # Disable attention Dropout: no Dropout op in ONNX
+            use_lora=self.model_config.get("use_lora", False),
+            lora_r=self.model_config.get("lora_r", 4),
+            lora_alpha=self.model_config.get("lora_alpha", 16),
         )
 
         # Randomize LayerNorm parameters (for testing)
@@ -121,6 +131,8 @@ class CCTExporter(BaseONNXExporter):
         - "linear": Only train the final FC layer (classifier_fc_weight/bias).
         - "full": Train all parameters (no frozen constants).
         - "custom": Use custom_trainable_params list from config.
+        - "lora": Freeze every parameter except the LoRA A/B adapters
+          (requires use_lora=True so the model actually has lora_* params).
 
         Args:
             all_param_names: List of all ONNX initializer names
@@ -143,7 +155,15 @@ class CCTExporter(BaseONNXExporter):
             "full": lambda n: False,
             # freeze nothing from the explicit list (keep user-supplied names)
             "custom": lambda n: n not in self.config.get("custom_trainable_params", []),
+            # LoRA: keep only adapters trainable
+            "lora": lambda n: "lora_" not in n,
         }
+
+        if strategy == "lora" and not self.config.get("use_lora", False):
+            raise ValueError(
+                "training_strategy='lora' requires use_lora=True so the model actually "
+                "contains lora_* parameters."
+            )
 
         if strategy not in _FREEZE:
             print(f"⚠️  Unknown training strategy '{strategy}', using 'no_tokenizer' as fallback")
