@@ -1,6 +1,6 @@
-# LoRA Fine-Tuning (TinyTransformer)
+# LoRA Fine-Tuning
 
-`TinyTransformer` supports parameter-efficient fine-tuning via
+Both `TinyTransformer` and `CCT` support parameter-efficient fine-tuning via
 [LoRA](https://arxiv.org/abs/2106.09685). Low-rank `A`/`B` adapters are attached
 to the four projections of the attention block (`q_proj`, `k_proj`, `v_proj`,
 `out_proj`); the existing training-graph generator (ORT `generate_artifacts`)
@@ -51,3 +51,43 @@ exp.export_training()
 The resulting `network_train.onnx` exposes 8 trainable tensors and 8
 `InPlaceAccumulatorV2` nodes (one pair per LoRA matrix); all base weights remain
 as frozen graph inputs.
+
+## CCT (CLI usage)
+
+```bash
+python Onnx4Deeploy.py -model CCT -mode train --use-lora \
+    --n-steps 16 --n-accum 2
+```
+
+Then run the generated graph through Deeploy:
+
+```bash
+python deeployTrainingRunner_tiled_siracusa.py \
+    -t /path/to/onnx/model/cct_lora_train \
+    --l1=128000 --defaultMemLevel=L3 \
+    --n-steps=16 --n-accum=2
+```
+
+If `inputs.npz` only contains a single mini-batch (i.e. `--n-batches 1
+--n-accum 1`), pass `--num-data-inputs=1` explicitly — the runner cannot
+auto-detect it without `mb1_arr_*` entries.
+
+## LoRA-specific Deeploy front-end fixes
+
+LoRA freezes most weights; the resulting graph triggers two front-end issues
+that the optimizer pipeline now handles automatically:
+
+1. **N-input Sum → chained Add value_info.** With LoRA adapters, the gradient
+   at a residual feed-point has more than 3 contributors (e.g. `q_proj`,
+   `k_proj`, `v_proj` plus their LoRA branches). ORT emits an N-input Sum;
+   `convert_sum_to_add` (in `trainOptimization.py`) now stamps `value_info` on
+   every `_intermediate_{j}` it creates so Deeploy's shape assertion passes.
+
+2. **Constant-fed multi-consumer Transpose/Reshape.** Frozen weights become
+   `Constant` nodes; `Constant → Transpose → {fwd MatMul, bwd Gemm}` would be
+   folded by Deeploy into a single Constant with two consumers, tripping
+   `DeeployTypes.hoistConstant`'s `len(constant.outputs) <= 1` assertion. The
+   `duplicate_constant_fed_transposes` pass (in `graph_cleaner.py`, wired into
+   the train pipeline after `process_onnx_model_name_with_type`) duplicates any
+   single-output node whose inputs are all from `Constant` nodes/initializers
+   and whose output has more than one consumer.

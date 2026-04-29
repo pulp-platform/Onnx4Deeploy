@@ -10,10 +10,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 - **MobileViT** model support (XXS, XS, S variants) - hybrid CNN-Transformer for mobile/edge
 - **TinyViT** model support - efficient hierarchical vision transformer
+- **CCT LoRA fine-tuning** end-to-end Deeploy support — `--use-lora` produces a
+  training graph that passes `deeployTrainingRunner_tiled_siracusa.py` (front-end
+  + tiling + GVSoC) at fp32
 
 ### Changed
 - Optimized MobileViT ONNX export: replaced dynamic `view(-1,...)` with static `reshape(batch_size,...)`
 - Fixed dimension propagation in transformer blocks to eliminate Shape/Gather nodes
+
+### Fixed
+- `convert_sum_to_add` (the copy in `trainOptimization.py` actually used by the
+  training pipeline) now stamps `value_info` on every `_intermediate_{j}` tensor
+  produced when an N-input Sum is split into chained Adds. Without this,
+  Deeploy's front-end shape assertion fires whenever a gradient feed-point has
+  more than 3 contributors (e.g. LoRA adapters add 3 extra branches per Q/K/V).
+- New pass `duplicate_constant_fed_transposes` (`graph_cleaner.py`, wired in
+  `train_optimizer.py`) — duplicates any Constant-fed Transpose/Reshape with
+  multiple consumers so each folded Constant has a single user, preventing
+  Deeploy's `hoistConstant` `len(constant.outputs) <= 1` assertion that fires
+  in LoRA when frozen weights are shared by forward MatMul and backward Gemm.
 
 ## [0.2.1] - 06.02.2026
 ### Changed
