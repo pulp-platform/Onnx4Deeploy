@@ -48,7 +48,11 @@ def run_train_onnx_optimization(
     from ..io.model_io import compare_onnx_models
 
     # Import from this package
-    from .graph_cleaner import canonicalize_ms_training_ops_file, remove_identity_nodes
+    from .graph_cleaner import (
+        canonicalize_ms_training_ops_file,
+        duplicate_constant_fed_transposes,
+        remove_identity_nodes,
+    )
     from .shape_optimizer import convert_reducesum_to_reshape
     from .trainOptimization import (
         add_backward_markers_to_nodes,
@@ -172,6 +176,9 @@ def run_train_onnx_optimization(
     print(f"✅ Successfully fused MatMul and Add to Gemm nodes. Saved as {onnx_output_file}")
     process_onnx_model_name_with_type(onnx_output_file, onnx_output_file)
     print(f"✅ Successfully processed ONNX model name with type. Saved as {onnx_output_file}")
+
+    duplicate_constant_fed_transposes(onnx_output_file, onnx_output_file)
+    print(f"✅ Duplicated multi-consumer Constant-fed Transposes. Saved as {onnx_output_file}")
 
     add_backward_markers_to_nodes(onnx_output_file, onnx_output_file)
     print(f"✅ Successfully added backward markers to nodes. Saved as {onnx_output_file}")
