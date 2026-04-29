@@ -2248,7 +2248,10 @@ def convert_sum_to_add(input_model_path, output_model_path):
     for source in (model.graph.input, model.graph.output, model.graph.value_info):
         for vi in source:
             if vi.type.tensor_type.HasField("shape"):
-                dims = [d.dim_value if d.HasField("dim_value") else 0 for d in vi.type.tensor_type.shape.dim]
+                dims = [
+                    d.dim_value if d.HasField("dim_value") else 0
+                    for d in vi.type.tensor_type.shape.dim
+                ]
                 shape_lookup[vi.name] = (vi.type.tensor_type.elem_type, dims)
     for init in model.graph.initializer:
         shape_lookup[init.name] = (init.data_type, list(init.dims))
@@ -2320,7 +2323,9 @@ def convert_sum_to_add(input_model_path, output_model_path):
                         intermediate_outputs.append(output)
                         if inferred_dtype is not None and inferred_shape is not None:
                             new_value_info.append(
-                                helper.make_tensor_value_info(output, inferred_dtype, inferred_shape)
+                                helper.make_tensor_value_info(
+                                    output, inferred_dtype, inferred_shape
+                                )
                             )
                             shape_lookup[output] = (inferred_dtype, inferred_shape)
 

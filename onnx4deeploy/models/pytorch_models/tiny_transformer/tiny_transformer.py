@@ -162,9 +162,7 @@ class TinyTransformerMnist(nn.Module):
     # ------------------------------------------------------------------
 
     @staticmethod
-    def _lora3d(
-        x: torch.Tensor, A: torch.Tensor, B: torch.Tensor, scaling: float
-    ) -> torch.Tensor:
+    def _lora3d(x: torch.Tensor, A: torch.Tensor, B: torch.Tensor, scaling: float) -> torch.Tensor:
         B_, S, D = x.shape
         x2d = x.reshape(B_ * S, D)
         out2d = (x2d @ A) @ B
@@ -209,9 +207,7 @@ class TinyTransformerMnist(nn.Module):
         ctx = torch.bmm(attn, v)
         x_out = self._lin3d(ctx, self.out_proj)  # (B, S, D)
         if self.use_lora:
-            x_out = x_out + self._lora3d(
-                ctx, self.lora_out_A, self.lora_out_B, self.lora_scaling
-            )
+            x_out = x_out + self._lora3d(ctx, self.lora_out_A, self.lora_out_B, self.lora_scaling)
         x = x_out + residual
 
         # ── Feed-forward block (pre-norm, residual) ─────────────────────────
