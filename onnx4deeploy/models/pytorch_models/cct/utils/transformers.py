@@ -16,9 +16,29 @@ class AttentionwLora(Module):
     """
     Attention module with explicit Q, K, V branches for ONNX export.
     Modified to use LoRA for fine-tuning.
+
+    LoRA forward path for each projection:
+        y = W·x + (x · A · B) · (alpha / r)
+
+    A is stored as (D, r) and B as (r, D) so the forward path is
+        x @ A @ B
+    instead of x @ A.t() @ B.t(); this avoids generating extra Transpose
+    nodes for the LoRA parameters at export time.
+
+    Base weights (q_proj/k_proj/v_proj/proj.weight) are NOT marked
+    requires_grad=False at the PyTorch level — the export pipeline freezes
+    them via `frozen_params` based on the exporter's training_strategy.
     """
 
-    def __init__(self, dim, num_heads=8, attention_dropout=0.1, projection_dropout=0.1):
+    def __init__(
+        self,
+        dim,
+        num_heads=8,
+        attention_dropout=0.1,
+        projection_dropout=0.1,
+        lora_r: int = 4,
+        lora_alpha: int = 16,
+    ):
         super().__init__()
         self.num_heads = num_heads
         head_dim = dim // self.num_heads
@@ -28,39 +48,29 @@ class AttentionwLora(Module):
         self.k_proj = Linear(dim, dim, bias=False)
         self.v_proj = Linear(dim, dim, bias=False)
 
-        self.q_proj.weight.requires_grad = False
-        self.k_proj.weight.requires_grad = False
-        self.v_proj.weight.requires_grad = False
+        self.lora_r = lora_r
+        self.lora_alpha = lora_alpha
+        self.scaling = lora_alpha / lora_r
 
-        self.lora_r = 4
-        self.lora_alpha = 16
-        self.scaling = self.lora_alpha / self.lora_r
+        self.lora_q_A = nn.Parameter(torch.zeros(dim, lora_r))
+        self.lora_q_B = nn.Parameter(torch.zeros(lora_r, dim))
+        self.lora_k_A = nn.Parameter(torch.zeros(dim, lora_r))
+        self.lora_k_B = nn.Parameter(torch.zeros(lora_r, dim))
+        self.lora_v_A = nn.Parameter(torch.zeros(dim, lora_r))
+        self.lora_v_B = nn.Parameter(torch.zeros(lora_r, dim))
 
-        self.lora_q_A = nn.Parameter(torch.zeros(self.lora_r, dim))
-        self.lora_q_B = nn.Parameter(torch.zeros(dim, self.lora_r))
-        self.lora_k_A = nn.Parameter(torch.zeros(self.lora_r, dim))
-        self.lora_k_B = nn.Parameter(torch.zeros(dim, self.lora_r))
-        self.lora_v_A = nn.Parameter(torch.zeros(self.lora_r, dim))
-        self.lora_v_B = nn.Parameter(torch.zeros(dim, self.lora_r))
-
-        nn.init.kaiming_uniform_(self.lora_q_A, a=math.sqrt(5.0))
-        nn.init.normal_(self.lora_q_B, mean=0.0, std=0.001)
-
-        nn.init.kaiming_uniform_(self.lora_k_A, a=math.sqrt(5.01))
-        nn.init.normal_(self.lora_k_B, mean=0.0, std=0.00105)
-
-        nn.init.kaiming_uniform_(self.lora_v_A, a=math.sqrt(4.99))
-        nn.init.normal_(self.lora_v_B, mean=0.0, std=0.00095)
+        # Standard LoRA init: A ~ kaiming_uniform, B = 0 → initial delta is 0.
+        for A in (self.lora_q_A, self.lora_k_A, self.lora_v_A):
+            nn.init.kaiming_uniform_(A, a=math.sqrt(5))
+        # B already zeros
 
         self.attn_drop = Dropout(attention_dropout)
 
         self.proj = Linear(dim, dim)
-        self.proj.weight.requires_grad = False
 
-        self.lora_proj_A = nn.Parameter(torch.zeros(self.lora_r, dim))
-        self.lora_proj_B = nn.Parameter(torch.zeros(dim, self.lora_r))
-        nn.init.kaiming_uniform_(self.lora_proj_A, a=math.sqrt(5.02))
-        nn.init.normal_(self.lora_proj_B, mean=0.0, std=0.00098)
+        self.lora_proj_A = nn.Parameter(torch.zeros(dim, lora_r))
+        self.lora_proj_B = nn.Parameter(torch.zeros(lora_r, dim))
+        nn.init.kaiming_uniform_(self.lora_proj_A, a=math.sqrt(5))
 
         self.proj_drop = Dropout(projection_dropout)
 
@@ -68,25 +78,25 @@ class AttentionwLora(Module):
         B, N, C = x.shape
 
         q_base = self.q_proj(x)
-        q_lora = x @ self.lora_q_A.t() @ self.lora_q_B.t()
+        q_lora = (x @ self.lora_q_A) @ self.lora_q_B * self.scaling
         q = (q_base + q_lora).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
 
         k_base = self.k_proj(x)
-        k_lora = x @ self.lora_k_A.t() @ self.lora_k_B.t()
+        k_lora = (x @ self.lora_k_A) @ self.lora_k_B * self.scaling
         k = (k_base + k_lora).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
 
         v_base = self.v_proj(x)
-        v_lora = x @ self.lora_v_A.t() @ self.lora_v_B.t()
+        v_lora = (x @ self.lora_v_A) @ self.lora_v_B * self.scaling
         v = (v_base + v_lora).reshape(B, N, self.num_heads, C // self.num_heads).permute(0, 2, 1, 3)
 
-        attn = q @ k.transpose(-2, -1)
+        attn = (q @ k.transpose(-2, -1)) * self.scale
         attn = F.softmax(attn, dim=-1)
         attn = self.attn_drop(attn)
 
         x = (attn @ v).transpose(1, 2).reshape(B, N, C)
 
         proj_base = self.proj(x)
-        proj_lora = x @ self.lora_proj_A.t() @ self.lora_proj_B.t()
+        proj_lora = (x @ self.lora_proj_A) @ self.lora_proj_B * self.scaling
         x = proj_base + proj_lora
 
         x = self.proj_drop(x)
@@ -270,7 +280,10 @@ class LinearwLora(Module):
 class TransformerEncoderLayer(Module):
     """
     Inspired by torch.nn.TransformerEncoderLayer and timm.
-    Now with LoRA on FFN layers.
+
+    Set ``use_lora=True`` to swap the attention module for AttentionwLora and
+    expose LoRA A/B adapters on q/k/v/proj. Pair with the CCT exporter's
+    ``training_strategy="lora"`` to freeze every base weight at export time.
     """
 
     def __init__(
@@ -281,20 +294,29 @@ class TransformerEncoderLayer(Module):
         dropout=0.1,
         attention_dropout=0.1,
         drop_path_rate=0.1,
+        use_lora: bool = False,
+        lora_r: int = 4,
+        lora_alpha: int = 16,
     ):
         super(TransformerEncoderLayer, self).__init__()
 
         self.pre_norm = LayerNorm(d_model)
-        # self.self_attn = AttentionwLora(dim=d_model,
-        #                            num_heads=nhead,
-        #                            attention_dropout=attention_dropout,
-        #                            projection_dropout=dropout)
-        self.self_attn = Attention(
-            dim=d_model,
-            num_heads=nhead,
-            attention_dropout=attention_dropout,
-            projection_dropout=dropout,
-        )
+        if use_lora:
+            self.self_attn = AttentionwLora(
+                dim=d_model,
+                num_heads=nhead,
+                attention_dropout=attention_dropout,
+                projection_dropout=dropout,
+                lora_r=lora_r,
+                lora_alpha=lora_alpha,
+            )
+        else:
+            self.self_attn = Attention(
+                dim=d_model,
+                num_heads=nhead,
+                attention_dropout=attention_dropout,
+                projection_dropout=dropout,
+            )
 
         # FFN layers with LoRA (rank=8)
         # self.linear1 = LinearwLora(d_model, dim_feedforward)
@@ -387,6 +409,9 @@ class TransformerClassifier(Module):
         stochastic_depth=0.1,
         positional_embedding="learnable",
         sequence_length=None,
+        use_lora: bool = False,
+        lora_r: int = 4,
+        lora_alpha: int = 16,
     ):
         super().__init__()
         positional_embedding = (
@@ -436,6 +461,9 @@ class TransformerClassifier(Module):
                     dropout=dropout,
                     attention_dropout=attention_dropout,
                     drop_path_rate=dpr[i],
+                    use_lora=use_lora,
+                    lora_r=lora_r,
+                    lora_alpha=lora_alpha,
                 )
                 for i in range(num_layers)
             ]
