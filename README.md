@@ -140,6 +140,15 @@ python Onnx4Deeploy.py --examples
 
 ---
 
+## 📚 Guides
+
+- [Training graph generation](docs/training_graph_generation.md)
+- [LoRA fine-tuning (TinyTransformer)](docs/lora_finetuning.md)
+- [Operator testing](docs/operator_testing_guide.md)
+- [Optimization pipeline](docs/optimization_pipeline_guide.md)
+
+---
+
 ## 🤝 Contributing
 
 We welcome contributions! Please see our [Contributing Guide](.github/CONTRIBUTING.md) for details.
