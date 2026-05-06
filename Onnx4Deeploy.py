@@ -413,7 +413,7 @@ def generate_model(
 
         # Resolve n_batches from whichever training-length parameter was given.
         # Priority: --n-batches > --n-steps > --n-epochs > default(4)
-        if mode == "train":
+        if mode in ("train", "train_single_step"):
             import math
 
             if n_batches is not None:
@@ -442,7 +442,7 @@ def generate_model(
         # inside export_training().  Exporters that support _config_overrides
         # will apply these at the end of their load_config() implementation.
         exporter._config_overrides = {}
-        if mode == "train":
+        if mode in ("train", "train_single_step"):
             exporter._config_overrides["n_batches"] = n_batches
             exporter._config_overrides["n_accum"] = n_accum
             exporter._config_overrides["batch_size"] = batch_size
@@ -483,9 +483,12 @@ def generate_model(
         elif mode == "train":
             onnx_file = exporter.export_training()
             mode_desc = "Training mode"
+        elif mode == "train_single_step":
+            onnx_file = exporter.export_training_single_step()
+            mode_desc = "Single-step (training-as-inference) mode"
         else:
             print(f"❌ Unknown mode: {mode}")
-            print("   Available modes: infer, train")
+            print("   Available modes: infer, train, train_single_step")
             sys.exit(1)
 
         print(f"\n{'='*70}")
@@ -608,9 +611,12 @@ Examples:
         "-mode",
         "--mode",
         type=str,
-        choices=["infer", "train"],
+        choices=["infer", "train", "train_single_step"],
         default="infer",
-        help="Model export mode: infer (inference) or train (training) [default: infer]",
+        help="Model export mode: infer (inference), train (training), or "
+        "train_single_step (training graph wired up for inference-runner-style "
+        "per-tensor gradient verification: lazy_reset_grad pinned True, "
+        "outputs.npz holds raw ORT grads). [default: infer]",
     )
 
     # Output path

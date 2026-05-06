@@ -22,16 +22,25 @@ from typing import Any, Dict, List, Optional, Tuple
 
 import onnx
 import torch
-from onnxruntime.training import artifacts
 
 from .onnx_utils import print_model_info
 
+# onnxruntime.training is only required by export_training (artifact generation).
+# Import lazily inside that method so single_step / inference / pytorch-only
+# workflows can run on systems without the onnxruntime-training package.
+
 
 class ExportMode(Enum):
-    """Export mode: training or inference."""
+    """Export mode: training, inference, or single-step training-as-inference."""
 
     TRAINING = "train"
     INFERENCE = "infer"
+    # Single-step training-as-inference: same fwd+bwd+InPlaceAccumulator graph as
+    # train, but lazy_reset_grad is pinned to True (constant initializer) so each
+    # InPlaceAccumulator output equals the pure batch dW (no historical accum).
+    # outputs.npz holds the raw ORT-computed grad for every graph output, letting
+    # `deeployRunner_*.py` (inference path) flag any per-tensor grad divergence.
+    SINGLE_STEP = "train_single_step"
 
 
 class BaseONNXExporter(ABC):
@@ -259,7 +268,7 @@ class BaseONNXExporter(ABC):
             "network": os.path.join(output_dir, "network.onnx"),
         }
 
-        if mode == ExportMode.TRAINING:
+        if mode in (ExportMode.TRAINING, ExportMode.SINGLE_STEP):
             paths.update(
                 {
                     "network_infer": os.path.join(output_dir, "network_infer.onnx"),
@@ -512,6 +521,8 @@ class BaseONNXExporter(ABC):
         #   optimizer_model.onnx — SGD parameter-update graph
         #   checkpoint/          — initial parameter values
         print("\n🏋️ Generating training artifacts...")
+        from onnxruntime.training import artifacts
+
         artifacts.generate_artifacts(
             onnx_model,
             optimizer=artifacts.OptimType.SGD,
@@ -762,7 +773,7 @@ class BaseONNXExporter(ABC):
         Main export entry point.
 
         Args:
-            mode: Export mode - "train" or "infer"
+            mode: Export mode - "train", "infer", or "train_single_step"
             save_path: Optional custom save path
 
         Returns:
@@ -772,5 +783,167 @@ class BaseONNXExporter(ABC):
             return self.export_training(save_path)
         elif mode == "infer":
             return self.export_inference(save_path)
+        elif mode == "train_single_step":
+            return self.export_training_single_step(save_path)
         else:
-            raise ValueError(f"Invalid mode: {mode}. Must be 'train' or 'infer'")
+            raise ValueError(
+                f"Invalid mode: {mode}. Must be 'train', 'infer', or 'train_single_step'"
+            )
+
+    # ---------------------------------------------------------------------- #
+    # Single-step training-as-inference                                       #
+    # ---------------------------------------------------------------------- #
+
+    def export_training_single_step(self, save_path: Optional[str] = None) -> str:
+        """
+        Export the training graph for per-tensor gradient verification.
+
+        Reuses ``export_training`` end-to-end, then post-processes ``network.onnx``:
+          1. Pin every ``tensor(bool)`` graph input (lazy_reset_grad and friends)
+             to a constant initializer ``[True]`` so each InPlaceAccumulator
+             output equals the pure batch dW (no historical accum).
+          2. Regenerate ``inputs.npz`` (drop bool entries since they are now
+             initializers) and ``outputs.npz`` (raw ORT-computed grad per
+             graph output, instead of SGD-updated parameter values).
+
+        Run via the inference path (``deeployRunner_*.py``) — Deeploy will
+        compare every graph output (loss + each ``<param>_grad.accumulation.out``)
+        against ORT and print per-tensor errors, pinpointing which gradient
+        diverges in the integrated execution.
+        """
+        # 1. Standard training export — produces network_train.onnx, network.onnx,
+        #    and the conventional inputs.npz / outputs.npz (which we will overwrite).
+        self.export_training(save_path)
+
+        # 2. Pin bool inputs as constant initializers in the deployed network.
+        print("\n🪛 Single-step post-process: pinning bool inputs as constants...")
+        self._pin_bool_inputs_as_constant(self.paths["network"], value=True)
+
+        # 3. Regenerate inputs.npz / outputs.npz for inference-runner-style
+        #    per-tensor verification.
+        print("\n🧪 Single-step post-process: regenerating inputs/outputs for inference runner...")
+        self._create_single_step_test_data()
+
+        print(f"\n{'='*60}")
+        print("✅ Single-step training-as-inference export complete")
+        print(f"   network.onnx (lazy_reset_grad pinned True)")
+        print(f"   inputs.npz   (no bool entries — match graph inputs)")
+        print(f"   outputs.npz  (raw ORT grads — match graph outputs)")
+        print(f"{'='*60}\n")
+        return self.paths["network"]
+
+    def _pin_bool_inputs_as_constant(self, onnx_path: str, value: bool = True) -> None:
+        """
+        Convert every ``tensor(bool)`` graph input into a constant initializer.
+
+        Removes the input entry and adds an initializer with the same name
+        carrying the scalar ``value`` (broadcast to the input's declared shape,
+        defaulting to ``[1]`` when a 1-D shape is missing).
+        """
+        import numpy as np
+        import onnx
+        from onnx import TensorProto, numpy_helper
+
+        model = onnx.load(onnx_path)
+        bool_input_names = []
+        kept_inputs = []
+        for inp in model.graph.input:
+            if inp.type.tensor_type.elem_type == TensorProto.BOOL:
+                bool_input_names.append(inp.name)
+            else:
+                kept_inputs.append(inp)
+
+        if not bool_input_names:
+            print("   (no tensor(bool) inputs found; nothing to pin)")
+            return
+
+        # Rewrite graph.input in-place (clear+extend; ProtoBuf RepeatedField
+        # disallows direct assignment).
+        del model.graph.input[:]
+        model.graph.input.extend(kept_inputs)
+
+        for name in bool_input_names:
+            # Hard-code as scalar [value]; matches lazy_reset_grad shape [1].
+            const_arr = np.array([value], dtype=bool)
+            init = numpy_helper.from_array(const_arr, name=name)
+            model.graph.initializer.append(init)
+            print(f"   pinned bool input '{name}' = [{value}]")
+
+        onnx.save(model, onnx_path)
+
+        # Re-run shape inference so downstream Deeploy sees consistent shapes
+        # for the now-initialized lazy_reset_grad.
+        try:
+            from ..optimization.shape_optimizer import infer_shapes_with_custom_ops
+
+            infer_shapes_with_custom_ops(onnx_path, onnx_path)
+        except Exception as e:
+            print(f"   ⚠️  Shape inference after pinning skipped: {e}")
+
+    def _create_single_step_test_data(self) -> None:
+        """
+        Generate ``inputs.npz`` and ``outputs.npz`` for the single-step
+        inference-style test:
+
+        - ``inputs.npz``: every non-bool graph input (data, labels, params,
+          grad-accumulation buffers initialized to zeros), keyed by input name
+          in graph order. Bool inputs are now constant initializers, so they
+          are NOT written here.
+        - ``outputs.npz``: raw ORT-computed value for every graph output
+          (loss + each ``<param>_grad.accumulation.out``), keyed by output
+          name in graph output order.
+
+        ORT runs against ``network_train.onnx`` (which still has the bool
+        input) with ``lazy_reset_grad=True``, so the recorded grads are pure
+        batch dW with no historical accumulation.
+        """
+        from pathlib import Path
+
+        import numpy as np
+        import onnxruntime as ort
+
+        input_shape = self.get_input_shape()
+        num_classes = self.config.get("num_classes", 2)
+        save_dir = Path(self.paths["output_dir"])
+
+        data_source = self.get_data_source()
+        test_inputs, labels_list = data_source.load_batches(1, input_shape, num_classes, seed=42)
+        test_input, labels = test_inputs[0], labels_list[0]
+
+        # Initial parameter values from network_infer.onnx (matches checkpoint).
+        infer_path = self.paths.get("network_infer", "")
+        init_source = (
+            infer_path if infer_path and os.path.exists(infer_path) else self.paths["network_train"]
+        )
+        init_map = self._load_init_map(init_source)
+
+        # Run ORT against the original training graph (bool input still present)
+        # with lazy_reset_grad=True → first-step semantics.
+        session = ort.InferenceSession(
+            self.paths["network_train"], providers=["CPUExecutionProvider"]
+        )
+        feed = self._build_input_feed(session, init_map, test_input, labels, lazy_reset_grad=True)
+        output_names = [o.name for o in session.get_outputs()]
+        output_values = session.run(None, feed)
+
+        # inputs.npz — drop bool-typed entries (they are constants in network.onnx now).
+        # Iterate in session.get_inputs() order so insertion order matches the
+        # post-pinning graph input order.
+        feed_no_bool: dict = {}
+        for inp in session.get_inputs():
+            if inp.type == "tensor(bool)":
+                continue
+            feed_no_bool[inp.name] = feed[inp.name]
+        np.savez(save_dir / "inputs.npz", **feed_no_bool)
+        print(
+            f"   ✅ inputs.npz  — {len(feed_no_bool)} tensors "
+            f"(bool inputs pinned as constants in network.onnx)"
+        )
+
+        # outputs.npz — raw grads, in graph output order.
+        outputs_dict = dict(zip(output_names, output_values))
+        np.savez(save_dir / "outputs.npz", **outputs_dict)
+        print(
+            f"   ✅ outputs.npz — {len(outputs_dict)} tensors "
+            f"(loss + per-parameter raw dW from ORT)"
+        )

@@ -19,7 +19,7 @@ Onnx4Deeploy provides a unified interface for exporting PyTorch models to ONNX f
 ## ✨ Features
 
 ### 🎯 Core capabilities
-- **Unified model export** — single API for both inference and training-mode ONNX graph generation
+- **Unified model export** — single API for inference, full training, and single-step training-as-inference debug mode
 - **15 model exporters** — MLperf Tiny, ViT-family, Mamba and simple reference models (see [Supported models](#-supported-models))
 - **38 operator test generators** — every Deeploy-supported ONNX op has its own reference test
 - **Training graph optimization** — custom passes (`fuse_mse_loss`, `fuse_global_average_pool_grad`, GEMM conversion, gradient-node cleanup, shape simplification, …) specialized for on-device training
@@ -100,6 +100,10 @@ python Onnx4Deeploy.py -model CCT -mode infer -o ./onnx
 # Generate a model training graph
 python Onnx4Deeploy.py -model CCT -mode train -o ./onnx
 
+# Generate single-step training-as-inference test fixture
+# (per-tensor gradient verification — see "Single-step debug mode" below)
+python Onnx4Deeploy.py -model CCT -mode train_single_step -o ./onnx
+
 # List available options
 python Onnx4Deeploy.py --list-models
 python Onnx4Deeploy.py --list-operators
@@ -109,7 +113,7 @@ python Onnx4Deeploy.py --examples
 **Available arguments:**
 - `-operator NAME` — generate an operator test (e.g., `Relu`, `Add`, `Gemm`, `ConvGradXW`)
 - `-model NAME` — generate a model ONNX (see [Supported models](#-supported-models))
-- `-mode {infer,train}` — model export mode (default: `infer`)
+- `-mode {infer,train,train_single_step}` — model export mode (default: `infer`); `train_single_step` produces an inference-runner-compatible single-step training fixture — see [Single-step debug mode](#-single-step-debug-mode-train_single_step) below
 - `-o PATH` — output directory path
 - `--n-epochs`, `--n-steps`, `--n-batches`, `--n-accum`, `--batch-size`, `--dataset`, `--data-path`, `--data-size`, `--lr`, `--classes` — training-mode knobs
 - `--list-models`, `--list-operators`, `--examples` — help / discovery
@@ -146,6 +150,83 @@ python Onnx4Deeploy.py --examples
 - [LoRA fine-tuning (TinyTransformer)](docs/lora_finetuning.md)
 - [Operator testing](docs/operator_testing_guide.md)
 - [Optimization pipeline](docs/optimization_pipeline_guide.md)
+
+---
+
+## 🔍 Single-step debug mode (`train_single_step`)
+
+Standard `train` mode runs **N optimizer steps** and only compares the final loss
+or weight values against a reference. When a model diverges (e.g. MobileNetV1
+step-2 loss off by 1.7 %), the symptom is a single scalar — you cannot tell
+which gradient is wrong.
+
+`train_single_step` rewires the same training graph so the **inference**
+runner (`deeployRunner_*.py`) can drive it for **per-tensor** gradient
+verification:
+
+| | `train` | `train_single_step` |
+|---|---|---|
+| Optimizer steps | N (default 4) | 1 (forward + backward only) |
+| `lazy_reset_grad` | runtime input | **constant initializer = `True`** (each `InPlaceAccumulator` output = pure batch dW, no historical accum) |
+| `inputs.npz` | `arr_0000…` + per-batch data + meta | **single named tensor** (the data input) — labels, params, and grad-accumulation buffers are baked into the deployed `network.onnx` as initializers |
+| `outputs.npz` | SGD-updated params + per-step losses | **`loss` + raw `<param>_grad.accumulation.out` per parameter** (PyTorch-autograd reference) |
+| Driver | `deeployTrainingRunner_*.py` | `deeployRunner_*.py` (untiled) or `deeployRunner_tiled_*.py` |
+| Failure tells you | "step k loss off by X" | "Output K (= `<layer>_grad.accumulation.out`) diff = X at index Y" |
+
+### Generate
+
+```bash
+# Direct from PyTorch model — needs onnxruntime-training installed
+python Onnx4Deeploy.py -model SimpleMLP -mode train_single_step -o ./onnx/simplemlp_single
+
+# Post-process an existing `train` artifact dir (also works on vendored
+# Deeploy fixtures that ship only network.onnx + inputs.npz + outputs.npz —
+# falls back to PyTorch fresh weights when network_infer.onnx is absent)
+python scripts/make_single_step.py --model MobileNetV1 \
+    /path/to/mobilenetv1_train  /path/to/mobilenetv1_single_step
+```
+
+### Run via the inference runner
+
+```bash
+cd $DEEPLOY/DeeployTest
+# untiled
+python deeployRunner_siracusa.py -t /path/to/<model>_single_step --cores=8 -vv
+# tiled (use the same --l1 / --defaultMemLevel as the original train test)
+python deeployRunner_tiled_siracusa.py -t /path/to/<model>_single_step \
+    --cores=8 --l1 128000 --defaultMemLevel L3 -vv
+```
+
+The runner prints `Errors: K out of N` plus per-element `Expected / Actual /
+Diff at Index … in Output …` lines, letting you bisect which Conv/BN backward
+gradient diverges in the integrated execution.
+
+### Required Deeploy companion change
+
+Deeploy's stock `PULPInPlaceAccumulatorV2TilingReadyBindings` uses the **tiled**
+template, which writes only `accum_buffer` and skips `data_out` (so the graph
+output that the inference runner reads gets garbage). Switch the binding to
+the non-tiled template for `train_single_step` to work:
+
+```python
+# Deeploy/Targets/PULPOpen/Tiler.py:201
+PULPInPlaceAccumulatorV2TilingReadyBindings = TilingReadyNodeBindings(
+    nodeBindings = PULPInPlaceAccumulatorV2Bindings,  # was: PULPInPlaceAccumulatorV2TiledBindings
+    tileConstraint = InPlaceAccumulatorV2TileConstraint())
+```
+
+The non-tiled template additionally writes `data_out` (an extra in-cluster
+copy, no DMA egress) and is regression-clean against the standard tiled
+training tests.
+
+### What single-step does *not* catch
+
+A single forward+backward exercises step-0 grads only. Bugs that need optimizer
+state, BN running statistics, or multi-step gradient accumulation history
+(e.g. drift introduced after gamma is updated, or `mm_add` race conditions
+that emerge only after several schedule rounds) will not surface here. Use
+`train_single_step` to confirm per-layer kernel correctness in isolation;
+fall back to multi-step `train` mode for end-to-end validation.
 
 ---
 
