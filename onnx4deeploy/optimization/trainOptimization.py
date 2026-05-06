@@ -1421,69 +1421,39 @@ def run_optmization_remove_biasgelu(onnx_train_file, onnx_out_file):
 
 def run_optmization_remove_biasgelugrad(onnx_train_file, onnx_out_file):
     """
-    Optimize ONNX model:
-    1. Convert BiasGeluGrad_dX nodes to GeluGrad nodes
-    2. Remove bias input (input 2)
-    3. Delete subsequent ReduceSum nodes
+    Replace BiasGeluGrad_dX nodes with GeluGrad nodes.
+
+    BiasGeluGrad_dX(dY, X, bias) computes gelu'(X+bias)*dY.  The forward pass
+    optimization (run_optmization_remove_biasgelu) already emitted an Add node
+    that produces f"{X}_add_bias", so we reference that tensor as data_in for
+    GeluGrad rather than re-creating it.  Downstream ReduceSum nodes (which
+    reduce [batch, seq, dim] → [dim] to obtain the bias gradient) are kept
+    as-is; removing them would drop the bias gradient computation entirely.
 
     Args:
         onnx_train_file: Input ONNX model path
         onnx_out_file: Output ONNX model path
     """
-    # Load ONNX model
     model = onnx.load(onnx_train_file)
     graph = model.graph
     modified_model = copy.deepcopy(model)
     modified_graph = modified_model.graph
 
-    # Track nodes to be removed
-    nodes_to_remove = set()
-
-    # Map original output names to new output names
-    output_mapping = {}
-
-    # First pass: identify BiasGeluGrad_dX nodes and corresponding ReduceSum nodes
     for i, node in enumerate(graph.node):
         if node.op_type == "BiasGeluGrad_dX" or (
             node.domain == "com.microsoft" and "BiasGeluGrad_dX" in node.name
         ):
-            # Create new GeluGrad node
-            new_inputs = [node.input[0], node.input[1]]  # Remove bias input (input[2])
+            # X+bias was produced by run_optmization_remove_biasgelu as f"{X}_add_bias"
+            x_plus_bias = f"{node.input[1]}_add_bias"
             new_node = helper.make_node(
-                "GeluGrad", inputs=new_inputs, outputs=[node.output[0]], name=f"GeluGrad_{i}"
+                "GeluGrad",
+                inputs=[node.input[0], x_plus_bias],
+                outputs=[node.output[0]],
+                name=f"GeluGrad_{i}",
             )
-
-            # Replace BiasGeluGrad_dX node with new GeluGrad node
             modified_graph.node.remove(modified_graph.node[i])
             modified_graph.node.insert(i, new_node)
 
-            # Check for ReduceSum nodes that take this node's output as input
-            for j, next_node in enumerate(graph.node):
-                if next_node.op_type == "ReduceSum" and node.output[0] in next_node.input:
-                    nodes_to_remove.add(j)
-                    # Map ReduceSum output to new node output
-                    output_mapping[next_node.output[0]] = node.output[0]
-
-    # Second pass: remove identified ReduceSum nodes
-    reduced_nodes = []
-    for i, node in enumerate(modified_graph.node):
-        if i not in nodes_to_remove:
-            # Update inputs that reference outputs of removed nodes
-            for j, input_name in enumerate(node.input):
-                if input_name in output_mapping:
-                    node.input[j] = output_mapping[input_name]
-            reduced_nodes.append(node)
-
-    # Replace nodes in the graph
-    del modified_graph.node[:]
-    modified_graph.node.extend(reduced_nodes)
-
-    # Update model outputs if needed
-    for output in modified_graph.output:
-        if output.name in output_mapping:
-            output.name = output_mapping[output.name]
-
-    # Save modified model
     onnx.save(modified_model, onnx_out_file)
     print(f"Optimized model saved to {onnx_out_file}")
 
