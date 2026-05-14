@@ -512,10 +512,18 @@ class MobileViT(nn.Module):
         self.conv1 = ConvBNAct(3, channels[0], kernel_size=3, stride=2)
 
         # Stage 1: MV2 blocks
-        self.mv2_1 = InvertedResidual(channels[0], channels[1], stride=1, expand_ratio=mv2_expand_ratio)
-        self.mv2_2 = InvertedResidual(channels[1], channels[2], stride=2, expand_ratio=mv2_expand_ratio)
-        self.mv2_3 = InvertedResidual(channels[2], channels[3], stride=1, expand_ratio=mv2_expand_ratio)
-        self.mv2_4 = InvertedResidual(channels[3], channels[4], stride=2, expand_ratio=mv2_expand_ratio)
+        self.mv2_1 = InvertedResidual(
+            channels[0], channels[1], stride=1, expand_ratio=mv2_expand_ratio
+        )
+        self.mv2_2 = InvertedResidual(
+            channels[1], channels[2], stride=2, expand_ratio=mv2_expand_ratio
+        )
+        self.mv2_3 = InvertedResidual(
+            channels[2], channels[3], stride=1, expand_ratio=mv2_expand_ratio
+        )
+        self.mv2_4 = InvertedResidual(
+            channels[3], channels[4], stride=2, expand_ratio=mv2_expand_ratio
+        )
 
         # Stage 2: MobileViT block 1
         feat_h_1, feat_w_1 = self.mvit_patch_dims[0]
@@ -529,10 +537,14 @@ class MobileViT(nn.Module):
             num_transformer_blocks=transformer_depths[0],
             batch_size=batch_size,
         )
-        self.mv2_5 = InvertedResidual(channels[4], channels[5], stride=1, expand_ratio=mv2_expand_ratio)
+        self.mv2_5 = InvertedResidual(
+            channels[4], channels[5], stride=1, expand_ratio=mv2_expand_ratio
+        )
 
         # Stage 3: MobileViT block 2
-        self.mv2_6 = InvertedResidual(channels[5], channels[6], stride=2, expand_ratio=mv2_expand_ratio)
+        self.mv2_6 = InvertedResidual(
+            channels[5], channels[6], stride=2, expand_ratio=mv2_expand_ratio
+        )
         feat_h_2, feat_w_2 = self.mvit_patch_dims[1]
         self.mvit2 = MobileViTBlock(
             channels[6],
@@ -544,10 +556,14 @@ class MobileViT(nn.Module):
             num_transformer_blocks=transformer_depths[1],
             batch_size=batch_size,
         )
-        self.mv2_7 = InvertedResidual(channels[6], channels[7], stride=1, expand_ratio=mv2_expand_ratio)
+        self.mv2_7 = InvertedResidual(
+            channels[6], channels[7], stride=1, expand_ratio=mv2_expand_ratio
+        )
 
         # Stage 4: MobileViT block 3
-        self.mv2_8 = InvertedResidual(channels[7], channels[8], stride=2, expand_ratio=mv2_expand_ratio)
+        self.mv2_8 = InvertedResidual(
+            channels[7], channels[8], stride=2, expand_ratio=mv2_expand_ratio
+        )
         feat_h_3, feat_w_3 = self.mvit_patch_dims[2]
         self.mvit3 = MobileViTBlock(
             channels[8],
