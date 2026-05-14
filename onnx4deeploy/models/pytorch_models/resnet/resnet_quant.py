@@ -28,6 +28,10 @@ _QUANT_KW = dict(
     weight_quant=Int8WeightPerTensorFloat,
     bias_quant=Int32Bias,
     output_quant=Int8ActPerTensorFloat,
+    # return a regular Tensor (with an implicit Dequant at the boundary) so
+    # downstream residual adds and BN-strip points don't hit Brevitas's
+    # "Scaling factors are different" check. Each layer transition becomes
+    # Quant→op→Dequant, matching the QCDQ contract Deeploy expects.
     return_quant_tensor=True,
 )
 
@@ -47,7 +51,11 @@ class QuantBasicBlock(nn.Module):
             kernel_size=3,
             stride=stride,
             padding=1,
-            bias=False,
+            # bias=True so Brevitas wires up an Int32Bias quant proxy. The bias
+            # starts zero and absorbs BN's beta/running-stats during the Conv+BN
+            # fold step in `BaseONNXExporter.export_quantized` (the proxy is
+            # already attached, so the fused value gets correctly quantized).
+            bias=True,
             **_QUANT_KW,
         )
         self.bn1 = nn.BatchNorm2d(out_channels)
@@ -59,20 +67,31 @@ class QuantBasicBlock(nn.Module):
             kernel_size=3,
             stride=1,
             padding=1,
-            bias=False,
+            # bias=True so Brevitas wires up an Int32Bias quant proxy. The bias
+            # starts zero and absorbs BN's beta/running-stats during the Conv+BN
+            # fold step in `BaseONNXExporter.export_quantized` (the proxy is
+            # already attached, so the fused value gets correctly quantized).
+            bias=True,
             **_QUANT_KW,
         )
         self.bn2 = nn.BatchNorm2d(out_channels)
 
         self.downsample = downsample
 
-        # Wraps the residual add output so it carries a quant tensor into the
-        # next stage (lets Brevitas/DeepQuant absorb the add into RequantShift
-        # downstream).
+        # Strip QuantTensors right before the residual add so the `+` runs on
+        # fp32 operands (avoiding Brevitas's per-tensor scale-match check),
+        # then re-quantize the sum. Each ``QuantIdentity`` here has a real
+        # ``act_quant`` so it actually emits a Quant→Dequant pair (one int8
+        # round-trip) — that strips the QuantTensor wrapper. Deeploy's
+        # PULPAddRequantMergePass folds Dequant→Add→Quant into RequantizedAdd.
+        self.dq_main = qnn.QuantIdentity(act_quant=Int8ActPerTensorFloat, return_quant_tensor=False)
+        self.dq_identity = qnn.QuantIdentity(
+            act_quant=Int8ActPerTensorFloat, return_quant_tensor=False
+        )
         self.add_q = qnn.QuantIdentity(act_quant=Int8ActPerTensorFloat, return_quant_tensor=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        identity = x if self.downsample is None else self.downsample(x)
+        identity = self.dq_identity(x if self.downsample is None else self.downsample(x))
 
         out = self.conv1(x)
         out = self.bn1(out)
@@ -80,6 +99,7 @@ class QuantBasicBlock(nn.Module):
 
         out = self.conv2(out)
         out = self.bn2(out)
+        out = self.dq_main(out)
 
         out = self.add_q(out + identity)
         out = self.relu(out)
@@ -96,7 +116,11 @@ class _QuantDownsample(nn.Module):
             out_channels,
             kernel_size=1,
             stride=stride,
-            bias=False,
+            # bias=True so Brevitas wires up an Int32Bias quant proxy. The bias
+            # starts zero and absorbs BN's beta/running-stats during the Conv+BN
+            # fold step in `BaseONNXExporter.export_quantized` (the proxy is
+            # already attached, so the fused value gets correctly quantized).
+            bias=True,
             **_QUANT_KW,
         )
         self.bn = nn.BatchNorm2d(out_channels)
@@ -132,7 +156,11 @@ class QuantResNet8(nn.Module):
             kernel_size=3,
             stride=1,
             padding=1,
-            bias=False,
+            # bias=True so Brevitas wires up an Int32Bias quant proxy. The bias
+            # starts zero and absorbs BN's beta/running-stats during the Conv+BN
+            # fold step in `BaseONNXExporter.export_quantized` (the proxy is
+            # already attached, so the fused value gets correctly quantized).
+            bias=True,
             **_QUANT_KW,
         )
         self.bn1 = nn.BatchNorm2d(c)
@@ -146,10 +174,16 @@ class QuantResNet8(nn.Module):
             c * 2, c * 4, stride=2, downsample=_QuantDownsample(c * 2, c * 4, stride=2)
         )
 
-        # Pool + classifier. Adaptive pool stays vanilla — only the data
-        # quantization on entry/exit matters.
-        self.avgpool = nn.AdaptiveAvgPool2d((1, 1))
+        # Pool + classifier. ``nn.AdaptiveAvgPool2d(1)`` exports to ONNX
+        # ``GlobalAveragePool`` which vanilla Deeploy:devel does not map on
+        # Siracusa; ``x.mean(dim=(2,3), keepdim=True)`` exports to ``ReduceMean
+        # axes=[2,3]`` (mathematically identical) which IS supported.
+        # ``pool_dq`` strips the QuantTensor wrapper so ``.mean()`` (which the
+        # QuantTensor type doesn't override) operates on a plain fp32 tensor.
+        self.pool_dq = qnn.QuantIdentity(act_quant=Int8ActPerTensorFloat, return_quant_tensor=False)
         self.flatten = nn.Flatten(start_dim=1)
+        # Re-quantize before fc (its Int32Bias proxy needs an input scale).
+        self.fc_iq = qnn.QuantIdentity(act_quant=Int8ActPerTensorFloat, return_quant_tensor=True)
         self.fc = qnn.QuantLinear(
             c * 4,
             num_classes,
@@ -166,8 +200,13 @@ class QuantResNet8(nn.Module):
         x = self.layer1(x)
         x = self.layer2(x)
         x = self.layer3(x)
-        x = self.avgpool(x)
+        x = self.pool_dq(x)
+        # Use functional form so even if Brevitas's tracer passes a
+        # QuantTensor through here, ``torch.mean`` dispatches via __torch_function__
+        # and gets the fp32 view (QuantTensor doesn't define `.mean` method).
+        x = torch.mean(x, dim=(2, 3), keepdim=True)
         x = self.flatten(x)
+        x = self.fc_iq(x)  # re-quant for fc's bias proxy
         x = self.fc(x)
         return x
 

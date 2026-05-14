@@ -30,6 +30,62 @@ from .onnx_utils import print_model_info
 # workflows can run on systems without the onnxruntime-training package.
 
 
+def _fold_conv_bn_inplace(model: "torch.nn.Module") -> int:
+    """Fold every Conv+BatchNorm2d pair in ``model`` into a single biased Conv.
+
+    Required before Brevitas/DeepQuant export so the resulting QCDQ ONNX has no
+    standalone ``BatchNormalization`` op (Deeploy's Siracusa target does not
+    map it; it expects BN to be absorbed at quant time).
+
+    Approach: walk every parent module, pair each ``BatchNorm2d`` child with
+    the immediately preceding ``Conv*`` child (sibling attribute, by attribute
+    declaration order). For each pair, use ``torch.nn.utils.fusion.fuse_conv_bn_eval``
+    to produce a Conv whose weight+bias absorbs gamma/beta/running_mean/var,
+    write it back in place of the original Conv, and replace the BN with
+    ``nn.Identity()``. This works on plain ``nn.Conv2d`` and on Brevitas
+    ``QuantConv2d`` (which inherits from ``nn.Conv2d`` and exposes the same
+    weight/bias parameters; the quantization proxies will re-wrap automatically).
+
+    Returns the number of pairs folded.
+    """
+    import torch.nn as nn
+    from torch.nn.utils.fusion import fuse_conv_bn_eval
+
+    n_folded = 0
+    for parent in model.modules():
+        # Children in declaration order. Pair each BN with its immediate
+        # predecessor Conv sibling (works for both Sequential and the
+        # ``self.conv1 = ...; self.bn1 = ...`` flat style).
+        children = list(parent.named_children())
+        for i, (bn_name, bn) in enumerate(children):
+            if not isinstance(bn, nn.BatchNorm2d):
+                continue
+            if i == 0:
+                continue
+            prev_name, prev = children[i - 1]
+            # ``QuantConv2d`` (Brevitas) subclasses ``nn.Conv2d``.
+            if not isinstance(prev, nn.Conv2d):
+                continue
+            try:
+                fused = fuse_conv_bn_eval(prev.eval(), bn.eval())
+            except Exception:
+                # Skip pairs where folding is not safe (e.g. shared params).
+                continue
+            # Write the fused weight/bias into the existing conv module so any
+            # Brevitas quant proxies attached to it stay wired up.
+            with torch.no_grad():
+                prev.weight.copy_(fused.weight.detach())
+                if fused.bias is not None:
+                    if prev.bias is None:
+                        prev.bias = nn.Parameter(fused.bias.detach().clone())
+                    else:
+                        prev.bias.copy_(fused.bias.detach())
+            # Replace BN with identity so the forward pass skips it cleanly.
+            setattr(parent, bn_name, nn.Identity())
+            n_folded += 1
+    return n_folded
+
+
 class ExportMode(Enum):
     """Export mode: training, inference, or single-step training-as-inference."""
 
@@ -845,6 +901,17 @@ class BaseONNXExporter(ABC):
         print("📦 Creating Brevitas-quantized PyTorch model...")
         model = self.create_brevitas_model()
         model.eval()
+
+        # Fold Conv → BatchNorm2d into a single biased Conv. Brevitas-quantized
+        # models keep ``nn.BatchNorm2d`` as a separate module (Brevitas does
+        # not auto-fuse), so the exported ONNX has a bare ``BatchNormalization``
+        # op which Deeploy targets like Siracusa do not map. Folding here
+        # produces a Conv that absorbs gamma/beta/running_mean/running_var
+        # into its weight+bias before quantization, eliminating the BN node
+        # from the final QCDQ graph.
+        n_folded = _fold_conv_bn_inplace(model)
+        if n_folded:
+            print(f"   Folded {n_folded} Conv+BatchNorm pair(s) into Conv weights/bias.")
 
         input_shape = self.get_input_shape()
         example = torch.randn(*input_shape, dtype=torch.float32)
