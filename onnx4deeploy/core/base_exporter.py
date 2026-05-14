@@ -115,6 +115,23 @@ class BaseONNXExporter(ABC):
             Tuple representing input shape (batch_size, channels, height, width) or similar
         """
 
+    # ------------------------------------------------------------------ #
+    # Quantized export (optional, per-exporter opt-in)                    #
+    # ------------------------------------------------------------------ #
+
+    def create_brevitas_model(self) -> torch.nn.Module:
+        """
+        Return a Brevitas-quantized version of the model.
+
+        Each exporter that wants to support `-mode quant` must override this.
+        See `docs/Quantization_Integration.md` for the Brevitas substitution
+        recipe and a worked example.
+        """
+        raise NotImplementedError(
+            f"{self.__class__.__name__} does not implement create_brevitas_model(). "
+            f"See docs/Quantization_Integration.md for the recipe."
+        )
+
     def get_trainable_params(self, all_param_names: List[str]) -> List[str]:
         """
         Get list of trainable parameter names.
@@ -773,7 +790,7 @@ class BaseONNXExporter(ABC):
         Main export entry point.
 
         Args:
-            mode: Export mode - "train", "infer", or "train_single_step"
+            mode: Export mode - "train", "infer", "train_single_step", or "quant"
             save_path: Optional custom save path
 
         Returns:
@@ -785,10 +802,94 @@ class BaseONNXExporter(ABC):
             return self.export_inference(save_path)
         elif mode == "train_single_step":
             return self.export_training_single_step(save_path)
+        elif mode == "quant":
+            return self.export_quantized(save_path)
         else:
             raise ValueError(
-                f"Invalid mode: {mode}. Must be 'train', 'infer', or 'train_single_step'"
+                f"Invalid mode: {mode}. Must be 'train', 'infer', 'train_single_step', or 'quant'"
             )
+
+    # ---------------------------------------------------------------------- #
+    # Quantized export via DeepQuant (Brevitas → QCDQ ONNX)                   #
+    # ---------------------------------------------------------------------- #
+
+    def export_quantized(self, save_path: Optional[str] = None) -> str:
+        """
+        Export the model to QCDQ ONNX via DeepQuant.
+
+        Requires the exporter subclass to implement ``create_brevitas_model``.
+        Calls ``DeepQuant.ExportBrevitas.exportBrevitas`` which produces an ONNX
+        with decomposed Quant (Div/Add/Round/Clip) and Dequant (Sub/Mul) nodes.
+        See ``docs/Quantization_Integration.md``.
+        """
+        try:
+            from DeepQuant.ExportBrevitas import exportBrevitas
+        except ImportError as exc:
+            raise ImportError(
+                "Quantized export requires DeepQuant. Install with:\n"
+                "  git clone https://github.com/pulp-platform/DeepQuant.git\n"
+                "  pip install -e DeepQuant\n"
+                "and ensure 'brevitas' is installed."
+            ) from exc
+
+        if save_path:
+            self.save_path = save_path
+
+        self.config = self.load_config()
+        self.paths = self.setup_paths(ExportMode.INFERENCE)
+
+        print(f"\n{'='*60}")
+        print(f"🚀 Exporting {self.get_model_name()} to QCDQ ONNX (Quantized Mode)")
+        print(f"{'='*60}\n")
+
+        print("📦 Creating Brevitas-quantized PyTorch model...")
+        model = self.create_brevitas_model()
+        model.eval()
+
+        input_shape = self.get_input_shape()
+        example = torch.randn(*input_shape, dtype=torch.float32)
+        print(f"   Input shape: {input_shape}")
+
+        # One forward pass on random data initializes Brevitas's per-tensor
+        # statistics. For production accuracy, replace this with a real PTQ
+        # calibration loop (see docs/Quantization_Integration.md §9).
+        print("\n📐 Running calibration forward pass (random input)...")
+        with torch.no_grad():
+            _ = model(example)
+
+        print("\n📤 Exporting via DeepQuant.exportBrevitas...")
+        # exportBrevitas writes to cwd; chdir to the output dir so the
+        # network.onnx + inputs.npz + outputs.npz land alongside.
+        from pathlib import Path
+        import os
+
+        out_dir = Path(self.paths["output_dir"])
+        out_dir.mkdir(parents=True, exist_ok=True)
+        cwd_before = os.getcwd()
+        try:
+            os.chdir(out_dir)
+            exportBrevitas(model, example)
+        finally:
+            os.chdir(cwd_before)
+
+        # DeepQuant emits ``4_model_dequant_moved.onnx`` by default. Promote it
+        # to the standard ``network.onnx`` filename so it slots into the rest
+        # of the Onnx4Deeploy pipeline.
+        deepquant_out = out_dir / "4_model_dequant_moved.onnx"
+        target = Path(self.paths["network"])
+        if deepquant_out.exists():
+            import shutil
+
+            shutil.copyfile(deepquant_out, target)
+            print(f"✅ Renamed {deepquant_out.name} → {target.name}")
+
+        print(f"\n{'='*60}")
+        print("✅ Quantized Export Complete!")
+        print(f"   Final model: {self.paths['network']}")
+        print(f"   I/O fixtures: {out_dir / 'inputs.npz'}, {out_dir / 'outputs.npz'}")
+        print(f"{'='*60}\n")
+
+        return str(target)
 
     # ---------------------------------------------------------------------- #
     # Single-step training-as-inference                                       #

@@ -486,9 +486,12 @@ def generate_model(
         elif mode == "train_single_step":
             onnx_file = exporter.export_training_single_step()
             mode_desc = "Single-step (training-as-inference) mode"
+        elif mode == "quant":
+            onnx_file = exporter.export_quantized()
+            mode_desc = "Quantized (QCDQ) mode"
         else:
             print(f"❌ Unknown mode: {mode}")
-            print("   Available modes: infer, train, train_single_step")
+            print("   Available modes: infer, train, train_single_step, quant")
             sys.exit(1)
 
         print(f"\n{'='*70}")
@@ -611,12 +614,13 @@ Examples:
         "-mode",
         "--mode",
         type=str,
-        choices=["infer", "train", "train_single_step"],
+        choices=["infer", "train", "train_single_step", "quant"],
         default="infer",
-        help="Model export mode: infer (inference), train (training), or "
+        help="Model export mode: infer (FP32 inference), train (training), "
         "train_single_step (training graph wired up for inference-runner-style "
         "per-tensor gradient verification: lazy_reset_grad pinned True, "
-        "outputs.npz holds raw ORT grads). [default: infer]",
+        "outputs.npz holds raw ORT grads), or quant (Brevitas QCDQ ONNX via "
+        "DeepQuant — see docs/Quantization_Integration.md). [default: infer]",
     )
 
     # Output path

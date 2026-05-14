@@ -84,6 +84,35 @@ class ResNetExporter(BaseONNXExporter):
             )
 
     # ------------------------------------------------------------------ #
+    # Brevitas-quantized factory (for `-mode quant`)                       #
+    # ------------------------------------------------------------------ #
+
+    def create_brevitas_model(self) -> torch.nn.Module:
+        """Return the Brevitas-quantized ResNet for ``-mode quant``.
+
+        Currently only ``variant=resnet8`` is implemented (MLperf Tiny IC).
+        Larger variants would mirror the same substitution recipe — see
+        ``docs/Quantization_Integration.md``.
+        """
+        variant = self.model_config.get("variant", "resnet18")
+        num_classes = self.model_config["num_classes"]
+        input_channels = self.model_config["input_channels"]
+
+        if variant == "resnet8":
+            from .pytorch_models.resnet import quant_resnet8
+
+            return quant_resnet8(
+                num_classes=num_classes,
+                input_channels=input_channels,
+                base_channels=self.model_config.get("base_channels", 16),
+            )
+        raise NotImplementedError(
+            f"Brevitas-quantized export is implemented only for variant=resnet8 "
+            f"(MLperf Tiny IC); got variant={variant}. Add a Quant{variant} "
+            f"in pytorch_models/resnet/resnet_quant.py to extend."
+        )
+
+    # ------------------------------------------------------------------ #
     # Shape helpers                                                        #
     # ------------------------------------------------------------------ #
 
