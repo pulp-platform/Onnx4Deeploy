@@ -37,12 +37,11 @@ from __future__ import annotations
 
 import math
 from collections import OrderedDict
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import numpy as np
 import onnx
 from onnx import helper, numpy_helper
-
 
 # ----------------------------------------------------------------------- #
 # Small helpers                                                            #
@@ -51,7 +50,8 @@ from onnx import helper, numpy_helper
 
 def _make_const(name: str, arr: np.ndarray) -> onnx.NodeProto:
     """Wrap a numpy array as a `Constant` node — used when we need a
-    graph-resident initializer with a known name and value."""
+    graph-resident initializer with a known name and value.
+    """
     return helper.make_node(
         "Constant",
         inputs=[],
@@ -66,7 +66,8 @@ def _init_lookup(graph: onnx.GraphProto) -> Dict[str, np.ndarray]:
 
     Also chases ``Cast(Constant)`` chains so the consumer code can resolve
     Cast-wrapped scalar bounds (Clip's min/max are typically emitted by
-    PyTorch's ONNX exporter as ``Constant → Cast``)."""
+    PyTorch's ONNX exporter as ``Constant → Cast``).
+    """
     out: Dict[str, np.ndarray] = {}
     for init in graph.initializer:
         out[init.name] = numpy_helper.to_array(init)
@@ -148,7 +149,8 @@ def fold_qcdq_to_quant_dequant(graph: onnx.GraphProto) -> int:
     """Find ``Div → Add → Round → Clip`` chains and collapse them into a
     single ``Quant`` node with ``scale, zero_point, bit_width, signed``
     attributes. Find ``Sub → Mul`` chains and collapse them into a single
-    ``Dequant`` node with the same attribute set."""
+    ``Dequant`` node with the same attribute set.
+    """
     inits = _init_lookup(graph)
     prod = _producer_map(graph)
 
@@ -288,7 +290,8 @@ def fold_qcdq_to_quant_dequant(graph: onnx.GraphProto) -> int:
 def fold_dequant_quant_to_requantshift(graph: onnx.GraphProto, shift_bits: int = 16) -> int:
     """Find every consecutive ``Dequant → Quant`` pair and replace with a
     single ``RequantShift`` op carrying mul / add (as 1-D int32 initializer
-    inputs) plus n_levels / signed / div attributes."""
+    inputs) plus n_levels / signed / div attributes.
+    """
     prod = _producer_map(graph)
     cons = _consumer_map(graph)
 
@@ -394,9 +397,10 @@ def skip_leading_quant_dequant(graph: onnx.GraphProto) -> int:
     """When the network starts with ``graph_input → Quant → Dequant → ...``
     (canonical Brevitas activation-quant pair), drop the trailing Dequant
     so the int8 output of the Quant feeds directly into the first integer
-    op."""
+    op.
+    """
     graph_input_names = {i.name for i in graph.input}
-    prod = _producer_map(graph)
+    _producer_map(graph)
     cons = _consumer_map(graph)
 
     n_changed = 0
@@ -446,9 +450,10 @@ def absorb_conv_bias_into_following_requantshift(graph: onnx.GraphProto) -> int:
     ``(X*W + B) * mul + add → X*W * mul + (B*mul + add)`` so the bias is
     no longer a Conv input. Required because PULPConv2DParser /
     PULPDWConv2DParser want exactly 4 inputs on the merged RequantizedConv:
-    (X, W, mul, merged_add)."""
+    (X, W, mul, merged_add).
+    """
     inits_by_name = {i.name: i for i in graph.initializer}
-    prod = _producer_map(graph)
+    _producer_map(graph)
     cons = _consumer_map(graph)
 
     n_changed = 0
@@ -507,7 +512,8 @@ def constfold_quant_of_initializer(graph: onnx.GraphProto) -> int:
 
     Fix: for every ``Quant`` whose input is an initializer, apply the
     quantization at export time, store the int result as a new initializer,
-    and remove the Quant node."""
+    and remove the Quant node.
+    """
     init_names = {init.name: init for init in graph.initializer}
     inits = _init_lookup(graph)
     nodes_to_remove: List[str] = []
@@ -561,8 +567,9 @@ def skip_dequant_before_integer_op(graph: onnx.GraphProto) -> int:
     RequantShift absorbs both the missing dequantize and the requantize.
 
     Any Dequant whose output also goes to a non-integer-mergeable op (e.g.
-    ReduceMean, Mul, Transpose-then-fp32-something) is left in place."""
-    prod = _producer_map(graph)
+    ReduceMean, Mul, Transpose-then-fp32-something) is left in place.
+    """
+    _producer_map(graph)
     cons = _consumer_map(graph)
 
     n_removed = 0
@@ -620,7 +627,8 @@ def strip_trailing_dequant(graph: onnx.GraphProto) -> int:
     """Remove the trailing ``Dequant`` if it's the last node feeding the
     graph output. Deeploy has no ``tileConstraint`` for Dequant either, so
     the network output must be the integer logits directly. (Float-domain
-    interpretation of the int logits is left to the user / test harness.)"""
+    interpretation of the int logits is left to the user / test harness.)
+    """
     if not graph.output:
         return 0
     out_name = graph.output[0].name
@@ -640,7 +648,8 @@ def strip_trailing_dequant(graph: onnx.GraphProto) -> int:
 def cleanup_orphan_nodes(graph: onnx.GraphProto) -> int:
     """Remove ``Constant`` / ``Cast`` nodes whose outputs are unused. The
     QCDQ→RequantShift fold leaves orphan scale/zp constants behind that
-    Deeploy then trips on during binding (PULPConstantBuffer has no _type)."""
+    Deeploy then trips on during binding (PULPConstantBuffer has no _type).
+    """
     while True:
         used: set = set()
         for n in graph.node:
@@ -682,7 +691,8 @@ def quantize_input_offline(model: onnx.ModelProto, inputs_npz_path: str) -> int:
     int8 result, then change the graph input dtype to int8 and delete the
     leading Quant.
 
-    Returns 1 if the strip happened, 0 otherwise."""
+    Returns 1 if the strip happened, 0 otherwise.
+    """
     g = model.graph
     if not g.input:
         return 0
@@ -739,9 +749,10 @@ def fold_standalone_quant_to_requantshift(graph: onnx.GraphProto, shift_bits: in
     which is exactly RequantShift.
 
     The new RequantShift has the same scale/zp as the original Quant, but
-    interprets the input as integer (scale-1 units) and produces int8."""
+    interprets the input as integer (scale-1 units) and produces int8.
+    """
     prod = _producer_map(graph)
-    cons = _consumer_map(graph)
+    _consumer_map(graph)
     graph_input_names = {i.name for i in graph.input}
 
     n_folded = 0
@@ -833,7 +844,8 @@ def remove_initializers_from_inputs(graph: onnx.GraphProto) -> int:
     sees them as ``Variable`` instead of ``Constant`` and the downstream
     RequantMerge passes that read ``.values`` off the bias / weight crash.
 
-    Returns the count of inputs removed."""
+    Returns the count of inputs removed.
+    """
     init_names = {init.name for init in graph.initializer}
     keep = [i for i in graph.input if i.name not in init_names]
     n_removed = len(graph.input) - len(keep)
@@ -876,7 +888,8 @@ def run_all_qcdq_to_deeploy_passes(
     """Run every pass in order, in-place on the model, returning a stats dict.
 
     If ``inputs_npz_path`` is given, the offline-quantize pass also rewrites
-    the npz to int8 so the leading Quant can be stripped."""
+    the npz to int8 so the leading Quant can be stripped.
+    """
     g = model.graph
     stats = OrderedDict()
     stats["remove_initializers_from_inputs"] = remove_initializers_from_inputs(g)

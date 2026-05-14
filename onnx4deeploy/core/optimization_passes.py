@@ -274,7 +274,8 @@ class TrainingOptimizationPass(OptimizationPass):
 
 def _wrap_qcdq_pass(name: str, description: str, fn):
     """Build an `OptimizationPass` from a function taking an `onnx.GraphProto`
-    (or a `(model, inputs_npz_path)` tuple for the input-quant pass)."""
+    (or a `(model, inputs_npz_path)` tuple for the input-quant pass).
+    """
     import onnx as _onnx
 
     class _QcdqPass(OptimizationPass):
@@ -298,7 +299,8 @@ def _wrap_qcdq_pass(name: str, description: str, fn):
 def _qcdq_pass(name: str, fn_name: str, description: str):
     """Factory that defers the import so this module stays light when
     `onnx4deeploy.optimization.qcdq_to_deeploy` (depends on `onnx`) isn't
-    importable in some minimal CI environments."""
+    importable in some minimal CI environments.
+    """
     import onnx as _onnx
 
     class _Pass(OptimizationPass):
@@ -386,7 +388,8 @@ class QuantInputOfflinePass(OptimizationPass):
 
     Stands apart from the other `_qcdq_pass`-wrapped ones because it also
     needs to rewrite inputs.npz (not just the ONNX). The inputs.npz path
-    is taken from config.params["inputs_npz_path"]."""
+    is taken from config.params["inputs_npz_path"].
+    """
 
     def __init__(self):
         super().__init__(
@@ -397,6 +400,7 @@ class QuantInputOfflinePass(OptimizationPass):
     def apply(self, onnx_file: str, output_file: str, config: PassConfig) -> bool:
         try:
             import onnx as _onnx
+
             from ..optimization.qcdq_to_deeploy import quantize_input_offline
 
             inputs_npz_path = config.params.get("inputs_npz_path")
