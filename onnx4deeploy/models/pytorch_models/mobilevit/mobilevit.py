@@ -472,6 +472,8 @@ class MobileViT(nn.Module):
         num_classes: int = 1000,
         dims: list = [96, 120, 144],
         channels: list = [16, 32, 48, 48, 64, 64, 80, 80, 96, 96, 384],
+        transformer_depths: list = [2, 4, 3],
+        mv2_expand_ratio: int = 4,
     ):
         """
         Initialize MobileViT with FIXED dimensions.
@@ -482,6 +484,10 @@ class MobileViT(nn.Module):
             num_classes: Number of output classes
             dims: Transformer dimensions for each MobileViT block
             channels: Channel configuration for each stage
+            transformer_depths: Number of transformer layers (L) per MobileViT
+                block. Paper Table-3 uses [2, 4, 3] for all three variants.
+            mv2_expand_ratio: Expansion factor for the MV2 inverted-residual
+                blocks. Paper §3.3 uses 2 for XXS and 4 for XS/S.
         """
         super().__init__()
 
@@ -506,10 +512,10 @@ class MobileViT(nn.Module):
         self.conv1 = ConvBNAct(3, channels[0], kernel_size=3, stride=2)
 
         # Stage 1: MV2 blocks
-        self.mv2_1 = InvertedResidual(channels[0], channels[1], stride=1)
-        self.mv2_2 = InvertedResidual(channels[1], channels[2], stride=2)
-        self.mv2_3 = InvertedResidual(channels[2], channels[3], stride=1)
-        self.mv2_4 = InvertedResidual(channels[3], channels[4], stride=2)
+        self.mv2_1 = InvertedResidual(channels[0], channels[1], stride=1, expand_ratio=mv2_expand_ratio)
+        self.mv2_2 = InvertedResidual(channels[1], channels[2], stride=2, expand_ratio=mv2_expand_ratio)
+        self.mv2_3 = InvertedResidual(channels[2], channels[3], stride=1, expand_ratio=mv2_expand_ratio)
+        self.mv2_4 = InvertedResidual(channels[3], channels[4], stride=2, expand_ratio=mv2_expand_ratio)
 
         # Stage 2: MobileViT block 1
         feat_h_1, feat_w_1 = self.mvit_patch_dims[0]
@@ -520,12 +526,13 @@ class MobileViT(nn.Module):
             feat_w=feat_w_1,
             patch_size=(2, 2),
             num_heads=4,
+            num_transformer_blocks=transformer_depths[0],
             batch_size=batch_size,
         )
-        self.mv2_5 = InvertedResidual(channels[4], channels[5], stride=1)
+        self.mv2_5 = InvertedResidual(channels[4], channels[5], stride=1, expand_ratio=mv2_expand_ratio)
 
         # Stage 3: MobileViT block 2
-        self.mv2_6 = InvertedResidual(channels[5], channels[6], stride=2)
+        self.mv2_6 = InvertedResidual(channels[5], channels[6], stride=2, expand_ratio=mv2_expand_ratio)
         feat_h_2, feat_w_2 = self.mvit_patch_dims[1]
         self.mvit2 = MobileViTBlock(
             channels[6],
@@ -534,12 +541,13 @@ class MobileViT(nn.Module):
             feat_w=feat_w_2,
             patch_size=(2, 2),
             num_heads=4,
+            num_transformer_blocks=transformer_depths[1],
             batch_size=batch_size,
         )
-        self.mv2_7 = InvertedResidual(channels[6], channels[7], stride=1)
+        self.mv2_7 = InvertedResidual(channels[6], channels[7], stride=1, expand_ratio=mv2_expand_ratio)
 
         # Stage 4: MobileViT block 3
-        self.mv2_8 = InvertedResidual(channels[7], channels[8], stride=2)
+        self.mv2_8 = InvertedResidual(channels[7], channels[8], stride=2, expand_ratio=mv2_expand_ratio)
         feat_h_3, feat_w_3 = self.mvit_patch_dims[2]
         self.mvit3 = MobileViTBlock(
             channels[8],
@@ -548,6 +556,7 @@ class MobileViT(nn.Module):
             feat_w=feat_w_3,
             patch_size=(2, 2),
             num_heads=4,
+            num_transformer_blocks=transformer_depths[2],
             batch_size=batch_size,
         )
         self.conv2 = ConvBNAct(channels[8], channels[9], kernel_size=1)
@@ -650,6 +659,8 @@ def mobile_vit_xxs(
         num_classes=num_classes,
         dims=[64, 80, 96],
         channels=[16, 16, 24, 24, 48, 48, 64, 64, 80, 80, 320],
+        transformer_depths=[2, 4, 3],
+        mv2_expand_ratio=2,
     )
 
 
@@ -675,6 +686,8 @@ def mobile_vit_xs(
         num_classes=num_classes,
         dims=[96, 120, 144],
         channels=[16, 32, 48, 48, 64, 64, 80, 80, 96, 96, 384],
+        transformer_depths=[2, 4, 3],
+        mv2_expand_ratio=4,
     )
 
 
@@ -700,4 +713,6 @@ def mobile_vit_s(
         num_classes=num_classes,
         dims=[144, 192, 240],
         channels=[16, 32, 64, 64, 96, 96, 128, 128, 160, 160, 640],
+        transformer_depths=[2, 4, 3],
+        mv2_expand_ratio=4,
     )
