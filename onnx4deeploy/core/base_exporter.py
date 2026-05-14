@@ -950,26 +950,20 @@ class BaseONNXExporter(ABC):
             shutil.copyfile(deepquant_out, target)
             print(f"✅ Renamed {deepquant_out.name} → {target.name}")
 
-        # Post-export: rewrite the QCDQ ONNX into the exact shape vanilla
-        # Deeploy:devel can consume (fold Dequant→Quant chains into
-        # RequantShift, strip the leading Q→D pair, upgrade ReduceMean axes,
-        # absorb Conv bias into the next RequantShift add). See
-        # onnx4deeploy/optimization/qcdq_to_deeploy.py for the full set.
-        from ..optimization.qcdq_to_deeploy import run_all_qcdq_to_deeploy_passes
-        import onnx as _onnx
+        # Post-export: run the quant optimization pipeline so the QCDQ ONNX
+        # comes out in the exact shape vanilla `pulp-platform/Deeploy:devel`
+        # consumes (Dequant→Quant pairs folded into RequantShift, weight
+        # quant pre-applied at compile time, graph-boundary Quant/Dequant
+        # stripped, Conv bias absorbed into the following RequantShift,
+        # ReduceMean axes attribute normalised, orphan Constants cleaned).
+        # See `onnx4deeploy.core.optimization_passes.create_quant_pipeline`
+        # for the full sequence and the reason each pass is needed.
+        from .optimization_passes import create_quant_pipeline
 
-        print("\n🔁 Adapting QCDQ ONNX for Deeploy frontend...")
-        m = _onnx.load(str(target))
+        print("\n🔁 Adapting QCDQ ONNX for Deeploy frontend (12-pass pipeline)...")
         inputs_npz_path = str(out_dir / "inputs.npz")
-        stats = run_all_qcdq_to_deeploy_passes(m, inputs_npz_path=inputs_npz_path)
-        for k, v in stats.items():
-            print(f"   {k}: {v}")
-        _onnx.save(m, str(target))
-        # Validate.
-        try:
-            _onnx.checker.check_model(str(target))
-        except Exception as exc:
-            print(f"   ⚠️  ONNX check_model warning: {exc}")
+        pipeline = create_quant_pipeline(inputs_npz_path=inputs_npz_path)
+        pipeline.run(str(target), str(target))
 
         print(f"\n{'='*60}")
         print("✅ Quantized Export Complete!")
