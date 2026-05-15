@@ -927,8 +927,8 @@ class BaseONNXExporter(ABC):
         print("\n📤 Exporting via DeepQuant.exportBrevitas...")
         # exportBrevitas writes to cwd; chdir to the output dir so the
         # network.onnx + inputs.npz + outputs.npz land alongside.
-        from pathlib import Path
         import os
+        from pathlib import Path
 
         out_dir = Path(self.paths["output_dir"])
         out_dir.mkdir(parents=True, exist_ok=True)

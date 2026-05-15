@@ -9,16 +9,10 @@ QuantLinear / QuantReLU substitutions and explicit QuantIdentity wraps around
 residual adds. Designed to be ``DeepQuant.exportBrevitas``-compatible.
 """
 
+import brevitas.nn as qnn
 import torch
 import torch.nn as nn
-
-import brevitas.nn as qnn
-from brevitas.quant.scaled_int import (
-    Int8ActPerTensorFloat,
-    Int8WeightPerTensorFloat,
-    Int32Bias,
-)
-
+from brevitas.quant.scaled_int import Int8ActPerTensorFloat, Int8WeightPerTensorFloat, Int32Bias
 
 # Common kwargs for QuantConv2d / QuantLinear: per-tensor INT8 weight + INT8
 # activation, INT32 bias. ``return_quant_tensor=True`` so downstream layers see

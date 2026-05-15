@@ -97,6 +97,19 @@ class AutoencoderExporter(BaseONNXExporter):
         )
 
     # ------------------------------------------------------------------ #
+    # Brevitas-quantized factory (for `-mode quant`)                       #
+    # ------------------------------------------------------------------ #
+
+    def create_brevitas_model(self) -> torch.nn.Module:
+        """Return the Brevitas-quantized FC Autoencoder for ``-mode quant``."""
+        from .pytorch_models.autoencoder import QuantFCAutoencoder
+
+        return QuantFCAutoencoder(
+            input_dim=self.model_config["input_dim"],
+            hidden_dims=self.model_config["hidden_dims"],
+        )
+
+    # ------------------------------------------------------------------ #
     # Shape helpers                                                        #
     # ------------------------------------------------------------------ #
 

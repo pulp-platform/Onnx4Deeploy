@@ -82,6 +82,22 @@ class DSCNNExporter(BaseONNXExporter):
         )
 
     # ------------------------------------------------------------------ #
+    # Brevitas-quantized factory (for `-mode quant`)                       #
+    # ------------------------------------------------------------------ #
+
+    def create_brevitas_model(self) -> torch.nn.Module:
+        """Return the Brevitas-quantized DS-CNN for ``-mode quant``."""
+        from .pytorch_models.dscnn import QuantDSCNN
+
+        return QuantDSCNN(
+            num_classes=self.model_config["num_classes"],
+            n_time=self.model_config["n_time"],
+            n_freq=self.model_config["n_freq"],
+            base_channels=self.model_config["base_channels"],
+            n_ds_blocks=self.model_config["n_ds_blocks"],
+        )
+
+    # ------------------------------------------------------------------ #
     # Shape helpers                                                        #
     # ------------------------------------------------------------------ #
 

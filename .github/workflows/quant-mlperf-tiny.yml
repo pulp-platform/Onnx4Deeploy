@@ -1,0 +1,106 @@
+# SPDX-FileCopyrightText: 2025 ETH Zurich and University of Bologna
+#
+# SPDX-License-Identifier: MIT
+
+name: Quant MLperf Tiny
+
+"on":
+  push:
+    branches:
+      - "**"
+    tags:
+      - "v*.*.*"
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  quant-smoke:
+    name: Brevitas → Deeploy QCDQ pipeline (${{ matrix.model }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ['3.10']
+        # One job per MLperf Tiny benchmark — runs in parallel and surfaces
+        # per-model failures clearly in the Checks UI.
+        model:
+          - ResNet8
+          - MobileNetV2-VWW
+          - DSCNN
+          - DSCNN-S
+          - Autoencoder
+          - Autoencoder-MLPerf
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install Onnx4Deeploy + brevitas
+        run: |
+          python -m pip install --upgrade pip setuptools wheel
+          pip install -e ".[dev,quant]"
+
+      - name: Install DeepQuant (not on PyPI)
+        run: |
+          pip install "git+https://github.com/pulp-platform/DeepQuant.git"
+
+      - name: Run `-mode quant` for ${{ matrix.model }}
+        run: |
+          python Onnx4Deeploy.py -model "${{ matrix.model }}" -mode quant -o "out/${{ matrix.model }}"
+
+      - name: Assert Deeploy-compatible ONNX
+        run: |
+          python - <<'PY'
+          import os, sys
+          from collections import Counter
+          import onnx
+
+          model_name = os.environ["MODEL_NAME"]
+          onnx_path = f"out/{model_name}/network.onnx"
+          m = onnx.load(onnx_path)
+
+          allowed = {
+              "Conv","Gemm","MatMul","Add","ReduceMean",
+              "Flatten","Reshape","Transpose","Squeeze","Unsqueeze",
+              "RequantShift",
+          }
+          counter = Counter(n.op_type for n in m.graph.node)
+          extras = set(counter) - allowed
+          if extras:
+              print(f"FAIL: {model_name} has unexpected op types: {sorted(extras)}", file=sys.stderr)
+              print(f"  full histogram: {dict(counter)}", file=sys.stderr)
+              sys.exit(1)
+
+          # All MLperf Tiny quant graphs must be int8 → int8 (Deeploy contract).
+          INT8 = 3
+          in_dt = m.graph.input[0].type.tensor_type.elem_type
+          out_dt = m.graph.output[0].type.tensor_type.elem_type
+          if in_dt != INT8 or out_dt != INT8:
+              print(f"FAIL: {model_name} dtype is in={in_dt} out={out_dt}, expected INT8/INT8", file=sys.stderr)
+              sys.exit(1)
+
+          print(f"OK: {model_name} → {sum(counter.values())} nodes, histogram={dict(counter)}")
+          PY
+        env:
+          MODEL_NAME: ${{ matrix.model }}
+
+      - name: Run pytest quant suite
+        # Only run on the canonical ResNet8 job to avoid 6× duplicated work;
+        # the matrix above already covers each model end-to-end via the CLI.
+        if: matrix.model == 'ResNet8'
+        run: |
+          python -m pytest tests/quant/ -v
+
+      - name: Upload generated ONNX (debug)
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: quant-onnx-${{ matrix.model }}
+          path: out/${{ matrix.model }}/
+          retention-days: 7
+          if-no-files-found: ignore
