@@ -20,10 +20,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # DeepQuant's pyproject pins `requires-python = ">=3.11"`. The other
-        # CI workflows here use 3.10 (matches the Onnx4Deeploy pyproject
-        # baseline), but the quant pipeline must run on 3.11+.
-        python-version: ['3.11']
+        # Onnx4Deeploy pins `requires-python = "==3.10.*"`. DeepQuant pins
+        # `>=3.11`, but its actual code is fine on 3.10 — we install it with
+        # `--ignore-requires-python` below. Keep this aligned with the rest
+        # of Onnx4Deeploy's CI (test-operators.yml uses 3.10).
+        python-version: ['3.10']
         # One job per MLperf Tiny benchmark — runs in parallel and surfaces
         # per-model failures clearly in the Checks UI.
         model:
@@ -49,8 +50,12 @@ jobs:
           pip install -e ".[dev,quant]"
 
       - name: Install DeepQuant (not on PyPI)
+        # `--ignore-requires-python`: DeepQuant pins `>=3.11` but its code
+        # runs fine on 3.10. The whole rest of Onnx4Deeploy CI pins 3.10,
+        # so override here rather than diverge the entire matrix.
         run: |
-          pip install "git+https://github.com/pulp-platform/DeepQuant.git"
+          pip install --ignore-requires-python \
+            "git+https://github.com/pulp-platform/DeepQuant.git"
 
       - name: Run `-mode quant` for ${{ matrix.model }}
         run: |
