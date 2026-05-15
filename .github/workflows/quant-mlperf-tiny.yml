@@ -20,7 +20,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python-version: ['3.10']
+        # DeepQuant's pyproject pins `requires-python = ">=3.11"`. The other
+        # CI workflows here use 3.10 (matches the Onnx4Deeploy pyproject
+        # baseline), but the quant pipeline must run on 3.11+.
+        python-version: ['3.11']
         # One job per MLperf Tiny benchmark — runs in parallel and surfaces
         # per-model failures clearly in the Checks UI.
         model:
