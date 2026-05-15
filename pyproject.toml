@@ -54,6 +54,12 @@ visualization = [
     "beautifulsoup4>=4.0.0",
     "pandas>=2.0.0",
 ]
+quant = [
+    # Brevitas: PyTorch quantization-aware library used by `-mode quant`.
+    # DeepQuant (Brevitas → QCDQ ONNX exporter) is not on PyPI and must be
+    # installed from source: `pip install git+https://github.com/pulp-platform/DeepQuant`.
+    "brevitas==0.12.1",
+]
 
 [project.urls]
 Homepage = "https://github.com/pulp-platform/Onnx4Deeploy"

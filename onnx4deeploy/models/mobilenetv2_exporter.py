@@ -60,6 +60,20 @@ class MobileNetV2Exporter(BaseONNXExporter):
         )
 
     # ------------------------------------------------------------------ #
+    # Brevitas-quantized factory (for `-mode quant`)                       #
+    # ------------------------------------------------------------------ #
+
+    def create_brevitas_model(self) -> torch.nn.Module:
+        """Return the Brevitas-quantized MobileNetV2 for ``-mode quant``."""
+        from .pytorch_models.mobilenet import quant_mobilenet_v2
+
+        return quant_mobilenet_v2(
+            num_classes=self.model_config["num_classes"],
+            width_mult=self.model_config["width_mult"],
+            input_channels=self.model_config["input_channels"],
+        )
+
+    # ------------------------------------------------------------------ #
     # Shape helpers                                                        #
     # ------------------------------------------------------------------ #
 

@@ -11,6 +11,8 @@ used in optimization pipelines.
 
 from __future__ import annotations
 
+from typing import Optional
+
 from .optimization_pipeline import OptimizationPass, PassConfig
 
 
@@ -253,6 +255,168 @@ class TrainingOptimizationPass(OptimizationPass):
             return False
 
 
+# ---------------------------------------------------------------------- #
+# Quantization-export optimization passes                                  #
+# ---------------------------------------------------------------------- #
+#
+# These wrap the in-place onnx.GraphProto helpers from
+# `onnx4deeploy.optimization.qcdq_to_deeploy` so they can sit in the same
+# `OptimizationPipeline` machinery as the inference/training passes.
+#
+# Pipeline factory: `create_quant_pipeline()` further below.
+#
+# Each pass:
+#   * loads the ONNX from disk
+#   * runs one transformation in-place
+#   * saves to the output path
+#   * reports the number of nodes affected via the pass description prefix
+
+
+def _wrap_qcdq_pass(name: str, description: str, fn):
+    """Build an `OptimizationPass` from a function taking an `onnx.GraphProto`
+    (or a `(model, inputs_npz_path)` tuple for the input-quant pass).
+    """
+    import onnx as _onnx
+
+    class _QcdqPass(OptimizationPass):
+        def __init__(self):
+            super().__init__(name=name, description=description)
+
+        def apply(self, onnx_file: str, output_file: str, config: PassConfig) -> bool:
+            try:
+                m = _onnx.load(onnx_file)
+                fn(m.graph)
+                _onnx.save(m, output_file)
+                return True
+            except Exception as e:
+                print(f"    Error: {e}")
+                return False
+
+    _QcdqPass.__name__ = f"Quant{name.title().replace('_','')}Pass"
+    return _QcdqPass
+
+
+def _qcdq_pass(name: str, fn_name: str, description: str):
+    """Factory that defers the import so this module stays light when
+    `onnx4deeploy.optimization.qcdq_to_deeploy` (depends on `onnx`) isn't
+    importable in some minimal CI environments.
+    """
+    import onnx as _onnx
+
+    class _Pass(OptimizationPass):
+        def __init__(self):
+            super().__init__(name=name, description=description)
+
+        def apply(self, onnx_file: str, output_file: str, config: PassConfig) -> bool:
+            try:
+                from ..optimization import qcdq_to_deeploy
+
+                fn = getattr(qcdq_to_deeploy, fn_name)
+                m = _onnx.load(onnx_file)
+                count = fn(m.graph)
+                _onnx.save(m, output_file)
+                print(f"    {name}: {count}")
+                return True
+            except Exception as e:
+                print(f"    Error in {name}: {e}")
+                return False
+
+    _Pass.__name__ = f"Quant_{name}"
+    return _Pass
+
+
+# Each Quant_* class wraps one in-place ONNX rewrite from qcdq_to_deeploy.
+QuantRemoveInitializersFromInputsPass = _qcdq_pass(
+    "remove_initializers_from_inputs",
+    "remove_initializers_from_inputs",
+    "Drop weight initializers from graph.input (PyTorch keep_initializers_as_inputs cleanup)",
+)
+QuantUpgradeReduceMeanAxesPass = _qcdq_pass(
+    "upgrade_reducemean_axes",
+    "upgrade_reducemean_axes",
+    "Rename opset-13 'axes' attribute to 'axis' so Deeploy's _remove_only_singleton_reduce_mean reads it",
+)
+QuantFoldQcdqToQuantDequantPass = _qcdq_pass(
+    "fold_qcdq_to_quant_dequant",
+    "fold_qcdq_to_quant_dequant",
+    "Collapse Div/Add/Round/Clip → Quant and Sub/Mul → Dequant; chase Cast(Constant) for bounds",
+)
+QuantConstfoldQuantOfInitializerPass = _qcdq_pass(
+    "constfold_quant_of_initializer",
+    "constfold_quant_of_initializer",
+    "Statically apply Quant() to constant weights/biases; emit int initializers directly",
+)
+QuantFoldDequantQuantToRequantShiftPass = _qcdq_pass(
+    "fold_dequant_quant_to_requantshift",
+    "fold_dequant_quant_to_requantshift",
+    "Match Dequant → Quant and replace with RequantShift (the QCDQ → RequantShift bridge)",
+)
+QuantSkipDequantBeforeIntegerOpPass = _qcdq_pass(
+    "skip_dequant_before_integer_op",
+    "skip_dequant_before_integer_op",
+    "Drop standalone Dequant whose output only flows into integer-friendly ops (Conv/Gemm/Add/ReduceMean)",
+)
+QuantFoldStandaloneQuantToRequantShiftPass = _qcdq_pass(
+    "fold_standalone_quant_to_requantshift",
+    "fold_standalone_quant_to_requantshift",
+    "Replace `int_op → Quant` chains with `int_op → RequantShift`",
+)
+QuantSkipLeadingQuantDequantPass = _qcdq_pass(
+    "skip_leading_quant_dequant",
+    "skip_leading_quant_dequant",
+    "Drop the trailing Dequant of a leading `input → Quant → Dequant → ...` pair",
+)
+QuantAbsorbConvBiasIntoFollowingRequantShiftPass = _qcdq_pass(
+    "absorb_conv_bias_into_following_requantshift",
+    "absorb_conv_bias_into_following_requantshift",
+    "Fold Conv.bias × RequantShift.mul into RequantShift.add (4-input RequantizedConv)",
+)
+QuantStripTrailingDequantPass = _qcdq_pass(
+    "strip_trailing_dequant",
+    "strip_trailing_dequant",
+    "Drop the trailing Dequant feeding the graph output; output stays int8",
+)
+QuantCleanupOrphanNodesPass = _qcdq_pass(
+    "cleanup_orphan_nodes",
+    "cleanup_orphan_nodes",
+    "Remove unused Constants/Casts/Identity nodes and orphan initializers",
+)
+
+
+class QuantInputOfflinePass(OptimizationPass):
+    """Pre-quantize inputs.npz and strip the leading Quant from the graph.
+
+    Stands apart from the other `_qcdq_pass`-wrapped ones because it also
+    needs to rewrite inputs.npz (not just the ONNX). The inputs.npz path
+    is taken from config.params["inputs_npz_path"].
+    """
+
+    def __init__(self):
+        super().__init__(
+            name="quantize_input_offline",
+            description="Pre-quantize inputs.npz to int8 and strip leading Quant from the graph",
+        )
+
+    def apply(self, onnx_file: str, output_file: str, config: PassConfig) -> bool:
+        try:
+            import onnx as _onnx
+
+            from ..optimization.qcdq_to_deeploy import quantize_input_offline
+
+            inputs_npz_path = config.params.get("inputs_npz_path")
+            if inputs_npz_path is None:
+                print(f"    Skipped: {self.name} requires inputs_npz_path in config.params")
+                return True
+            m = _onnx.load(onnx_file)
+            count = quantize_input_offline(m, inputs_npz_path)
+            _onnx.save(m, output_file)
+            print(f"    {self.name}: {count}")
+            return True
+        except Exception as e:
+            print(f"    Error in {self.name}: {e}")
+            return False
+
+
 # Registry of standard passes
 STANDARD_PASSES = {
     "rename_nodes": RenameNodesPass,
@@ -267,6 +431,19 @@ STANDARD_PASSES = {
     "onnxruntime_transformer": ONNXRuntimeTransformerPass,
     "randomize_initializers": RandomizeInitializersPass,
     "training_optimization": TrainingOptimizationPass,
+    # Quantization-export passes
+    "quant_remove_initializers_from_inputs": QuantRemoveInitializersFromInputsPass,
+    "quant_upgrade_reducemean_axes": QuantUpgradeReduceMeanAxesPass,
+    "quant_fold_qcdq_to_quant_dequant": QuantFoldQcdqToQuantDequantPass,
+    "quant_constfold_quant_of_initializer": QuantConstfoldQuantOfInitializerPass,
+    "quant_fold_dequant_quant_to_requantshift": QuantFoldDequantQuantToRequantShiftPass,
+    "quant_skip_dequant_before_integer_op": QuantSkipDequantBeforeIntegerOpPass,
+    "quant_fold_standalone_quant_to_requantshift": QuantFoldStandaloneQuantToRequantShiftPass,
+    "quant_skip_leading_quant_dequant": QuantSkipLeadingQuantDequantPass,
+    "quant_absorb_conv_bias_into_following_requantshift": QuantAbsorbConvBiasIntoFollowingRequantShiftPass,
+    "quant_input_offline": QuantInputOfflinePass,
+    "quant_strip_trailing_dequant": QuantStripTrailingDequantPass,
+    "quant_cleanup_orphan_nodes": QuantCleanupOrphanNodesPass,
 }
 
 
@@ -303,6 +480,94 @@ def create_training_pipeline() -> "OptimizationPipeline":
 
     pipeline = OptimizationPipeline(name="training")
     pipeline.add_pass(TrainingOptimizationPass())
+
+    return pipeline
+
+
+def create_quant_pipeline(inputs_npz_path: Optional[str] = None) -> "OptimizationPipeline":
+    """Default quantization-export optimization pipeline.
+
+    Run on the QCDQ ONNX produced by ``DeepQuant.exportBrevitas`` after
+    Brevitas has done its job. Each pass closes one specific impedance
+    mismatch between DeepQuant's QDQ representation and the integer-pipeline
+    Deeploy expects. After this pipeline finishes the ONNX is directly
+    compilable by vanilla ``pulp-platform/Deeploy:devel`` — no Deeploy patches
+    required.
+
+    Pass order matters; see the per-pass docstring for *why*. Categories:
+
+    * Cleanup of PyTorch / ONNX-runtime export artefacts
+        - quant_remove_initializers_from_inputs
+
+    * Opset-13 → Deeploy-readable form
+        - quant_upgrade_reducemean_axes
+
+    * QCDQ recognition (Brevitas decomposed form → single Quant/Dequant ops)
+        - quant_fold_qcdq_to_quant_dequant
+
+    * Static weight quantization (compile-time Quant of constants)
+        - quant_constfold_quant_of_initializer
+
+    * QDQ → RequantShift bridge (the core translation)
+        - quant_fold_dequant_quant_to_requantshift
+        - quant_skip_dequant_before_integer_op
+        - quant_fold_standalone_quant_to_requantshift
+
+    * Graph-boundary normalization (Deeploy has no tile-constraint for
+      Quant/Dequant, so the network must start and end on integer ops)
+        - quant_skip_leading_quant_dequant
+        - quant_input_offline    (requires inputs_npz_path)
+        - quant_strip_trailing_dequant
+
+    * Deeploy folding-rule gap workarounds
+        - quant_absorb_conv_bias_into_following_requantshift
+
+    * Hygiene
+        - quant_cleanup_orphan_nodes
+
+    Args:
+        inputs_npz_path: path to the calibration `inputs.npz`. If provided,
+            the `quantize_input_offline` pass rewrites the npz to int8 and
+            strips the leading Quant from the graph. Otherwise that pass is
+            skipped (network input stays fp32 with a Quant first; Deeploy
+            won't compile this — useful only for inspection).
+
+    Returns:
+        OptimizationPipeline preconfigured with all 12 passes in the right
+        order. Use ``pipeline.disable_pass(name)`` to skip any of them.
+    """
+    from .optimization_pipeline import OptimizationPipeline
+
+    pipeline = OptimizationPipeline(name="quant")
+
+    # 1. PyTorch / ORT export hygiene
+    pipeline.add_pass(QuantRemoveInitializersFromInputsPass())
+    # 2. Opset compatibility shims
+    pipeline.add_pass(QuantUpgradeReduceMeanAxesPass())
+    # 3. Recognise Brevitas decomposed QCDQ structure
+    pipeline.add_pass(QuantFoldQcdqToQuantDequantPass())
+    # 4. Compile-time static quantization of weight/bias constants
+    pipeline.add_pass(QuantConstfoldQuantOfInitializerPass())
+    # 5. QDQ → RequantShift core translation (mid-network)
+    pipeline.add_pass(QuantFoldDequantQuantToRequantShiftPass())
+    pipeline.add_pass(QuantSkipDequantBeforeIntegerOpPass())
+    pipeline.add_pass(QuantFoldStandaloneQuantToRequantShiftPass())
+    # 6. Graph-boundary normalisation
+    pipeline.add_pass(QuantSkipLeadingQuantDequantPass())
+    # 7. Deeploy folding-rule patch (Conv-bias→RQS-add)
+    pipeline.add_pass(QuantAbsorbConvBiasIntoFollowingRequantShiftPass())
+    # 8. Input/output boundary clean-up (run after all other folds)
+    input_pass = QuantInputOfflinePass()
+    if inputs_npz_path is not None:
+        pipeline.add_pass(
+            input_pass, config=PassConfig(params={"inputs_npz_path": inputs_npz_path})
+        )
+    else:
+        pipeline.add_pass(input_pass)
+        pipeline.disable_pass("quantize_input_offline")
+    pipeline.add_pass(QuantStripTrailingDequantPass())
+    # 9. Hygiene
+    pipeline.add_pass(QuantCleanupOrphanNodesPass())
 
     return pipeline
 
