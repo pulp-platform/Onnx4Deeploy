@@ -17,6 +17,7 @@ from .resnet_exporter import ResNetExporter
 from .simple_cnn_exporter import SimpleCnnExporter
 from .simple_mlp_exporter import SimpleMlpExporter
 from .sleep_convit_exporter import SleepConViTExporter
+from .speechnet_exporter import SpeechNetExporter
 from .tiny_transformer_exporter import TinyTransformerExporter
 from .tinyvit_exporter import TinyViTExporter
 
@@ -36,4 +37,5 @@ __all__ = [
     "SleepConViTExporter",
     "TinyTransformerExporter",
     "TinyViTExporter",
+    "SpeechNetExporter",
 ]

@@ -204,6 +204,18 @@ def tiny_transformer_config():
 
 
 @pytest.fixture
+def speechnet_config():
+    """Default SpeechNet configuration for fast tests (SilentWear EMG)."""
+    return {
+        "batch_size": 1,
+        "num_channels": 14,
+        "time_steps": 700,
+        "num_classes": 9,
+        "opset_version": 17,
+    }
+
+
+@pytest.fixture
 def sleep_convit_config():
     """Default SleepConViT configuration (tests use library defaults).
 
