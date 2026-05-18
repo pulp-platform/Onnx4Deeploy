@@ -46,6 +46,7 @@ def list_available_models():
         SimpleCnnExporter,
         SimpleMlpExporter,
         SleepConViTExporter,
+        SpeechNetExporter,
         TinyTransformerExporter,
         TinyViTExporter,
     )
@@ -225,6 +226,14 @@ def list_available_models():
             "description": "Tiny Patch Transformer for MNIST (~10K params, fast compile)",
             "input_shape": "(B, 16, 49)",
             "classes": 10,
+        },
+        # EMG / Bio-Signal Models
+        "SpeechNet": {
+            "class": SpeechNetExporter,
+            "description": "SpeechNet (SilentWear EMG silent speech, ~15K params)",
+            "input_shape": "(B, 1, 14, 700)",
+            "classes": 9,
+            "config": {"num_channels": 14, "time_steps": 700, "num_classes": 9},
         },
         "LightweightCNN": {
             "class": LightweightCnnExporter,
