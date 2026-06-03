@@ -11,7 +11,7 @@ import numpy as np
 import torch
 
 from ..core.base_exporter import BaseONNXExporter
-from .pytorch_models.tsdr import SpokenNumberRecognizer
+from .pytorch_models.tsdr import SpokenDigitTransformer
 
 
 class TSDRExporter(BaseONNXExporter):
@@ -28,11 +28,12 @@ class TSDRExporter(BaseONNXExporter):
         config = {
             "batch_size": 1,
             "mel_bands": 80,
-            "time_steps": 101,       # Fixed for ONNX export
+            "time_steps": 101,           # Fixed for ONNX export
             "num_classes": 10,
             "d_model": 128,
             "nhead": 8,
-            "num_layers": 4,
+            "num_layers": 3,             # Matches SpokenDigitTransformer
+            "dim_feedforward": 192,      # d_model + d_model//2
             "max_len": 5000,
             "opset_version": 17,
             "training_strategy": "full",
@@ -42,13 +43,24 @@ class TSDRExporter(BaseONNXExporter):
         self.model_config = config
         return config
 
+    def get_inference_pipeline(self):
+        from ..core.optimization_passes import create_transformer_inference_pipeline
+
+        return create_transformer_inference_pipeline(
+            embedding_dim=self.config["d_model"],
+            num_heads=self.config["nhead"],
+            input_shape=self.get_input_shape(),
+        )
+
     def create_model(self) -> torch.nn.Module:
-        return SpokenNumberRecognizer(
+        return SpokenDigitTransformer(
             num_classes=self.model_config["num_classes"],
             d_model=self.model_config["d_model"],
             nhead=self.model_config["nhead"],
             num_layers=self.model_config["num_layers"],
+            dim_feedforward=self.model_config["dim_feedforward"],
             max_len=self.model_config["max_len"],
+            fixed_len=self.model_config["time_steps"],
         )
 
     def get_input_shape(self) -> Tuple[int, ...]:
@@ -56,6 +68,7 @@ class TSDRExporter(BaseONNXExporter):
             self.config["batch_size"],
             self.config["mel_bands"],
             self.config["time_steps"],
+            1,  # dummy spatial dim for Conv2d compatibility
         )
 
     def get_trainable_params(self, all_param_names: List[str]) -> List[str]:

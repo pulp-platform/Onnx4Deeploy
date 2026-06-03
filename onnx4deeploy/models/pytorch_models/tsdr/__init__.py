@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-from .spoken_number_recognizer import SpokenNumberRecognizer
+from .spoken_digit_transformer import SpokenDigitTransformer
 from .qspoken_number_recognizer import QSpokenNumberRecognizer
 
-__all__ = ["SpokenNumberRecognizer", "QSpokenNumberRecognizer"]
+__all__ = ["SpokenDigitTransformer", "QSpokenNumberRecognizer"]

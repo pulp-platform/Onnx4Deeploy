@@ -14,7 +14,7 @@ from typing import Tuple
 
 
 def run_onnx_optimization_infer(
-    onnx_file: str, embedding_dim: int, num_heads: int, input_shape: Tuple[int, int, int, int]
+    onnx_file: str, embedding_dim: int, num_heads: int, input_shape: Tuple[int, ...]
 ) -> None:
     """
     Run ONNX Runtime optimization for inference models.
@@ -23,9 +23,9 @@ def run_onnx_optimization_infer(
         onnx_file: Path to the ONNX model file
         embedding_dim: Embedding dimension for the model
         num_heads: Number of attention heads
-        input_shape: Input shape as (batch_size, channels, height, width)
+        input_shape: Input shape tuple (any rank)
     """
-    batch_size, channels, height, width = input_shape  # Extract input dimensions
+    input_shape_str = ",".join(str(d) for d in input_shape)
     try:
         print("🔹 Fixing dynamic shape...")
         subprocess.run(
@@ -36,7 +36,7 @@ def run_onnx_optimization_infer(
                 "--input_name",
                 "input",
                 "--input_shape",
-                f"{batch_size},{channels},{height},{width}",
+                input_shape_str,
                 onnx_file,
                 onnx_file,
             ],
@@ -90,7 +90,7 @@ def run_onnx_optimization_infer(
 
 
 def run_onnx_optimization(
-    onnx_file: str, embedding_dim: int, num_heads: int, input_shape: Tuple[int, int, int, int]
+    onnx_file: str, embedding_dim: int, num_heads: int, input_shape: Tuple[int, ...]
 ) -> None:
     """
     Run ONNX Runtime tools to optimize the model.
@@ -99,9 +99,9 @@ def run_onnx_optimization(
         onnx_file: Path to the ONNX model file
         embedding_dim: Embedding dimension for the model
         num_heads: Number of attention heads
-        input_shape: Input shape as (batch_size, channels, height, width)
+        input_shape: Input shape tuple (any rank)
     """
-    batch_size, channels, height, width = input_shape  # Extract input dimensions
+    input_shape_str = ",".join(str(d) for d in input_shape)
 
     try:
         print("🔹 Fixing dynamic shape...")
@@ -113,7 +113,7 @@ def run_onnx_optimization(
                 "--input_name",
                 "input",
                 "--input_shape",
-                f"{batch_size},{channels},{height},{width}",
+                input_shape_str,
                 onnx_file,
                 onnx_file,
             ],

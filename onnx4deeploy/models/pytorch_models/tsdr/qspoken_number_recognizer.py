@@ -5,7 +5,7 @@
 """QSpokenNumberRecognizer – Brevitas INT8 quantized T-SDR.
 
 Follows the same quantization pattern as QSleepConViT:
-- QuantConv1d for the input projection.
+- QuantConv2d (kernel (3,1)) for the input projection; input is (B,80,T,1).
 - QuantMultiheadAttention for self-attention in each encoder layer.
 - QuantLinear for FFN layers and the output head.
 - QuantIdentity for residual rescaling and requantization.
@@ -96,7 +96,7 @@ class _PositionalEncoding(nn.Module):
 # ---------------------------------------------------------------------------
 
 class _QEncoderLayer(nn.Module):
-    def __init__(self, d_model: int, nhead: int, dim_feedforward: int = 256):
+    def __init__(self, d_model: int, nhead: int, dim_feedforward: int = 192):
         super().__init__()
         self.norm1 = nn.LayerNorm(d_model)
         self.mha = qnn.QuantMultiheadAttention(
@@ -135,7 +135,7 @@ class _QEncoderLayer(nn.Module):
 
 class _QTransformerEncoderBlock(nn.Module):
     def __init__(self, d_model: int, nhead: int,
-                 num_layers: int, dim_feedforward: int = 256):
+                 num_layers: int, dim_feedforward: int = 192):
         super().__init__()
         self.layers = nn.ModuleList([
             _QEncoderLayer(d_model, nhead, dim_feedforward)
@@ -153,39 +153,44 @@ class _QTransformerEncoderBlock(nn.Module):
 # ---------------------------------------------------------------------------
 
 class QSpokenNumberRecognizer(nn.Module):
-    """INT8 quantized SpokenNumberRecognizer for ONNX/Deeploy deployment.
+    """INT8 quantized SpokenDigitTransformer for ONNX/Deeploy deployment.
 
     Args:
         num_classes: Number of digit classes (default 10).
         d_model: Transformer hidden dimension (default 128).
         nhead: Number of attention heads (default 8).
-        num_layers: Number of encoder layers (default 4).
+        num_layers: Number of encoder layers (default 3).
+        dim_feedforward: FFN hidden dimension (default 192 = d_model + d_model//2).
         max_len: Maximum sequence length for positional encoding.
+        time_steps: Fixed sequence length; eliminates dynamic Slice in ONNX graph.
     """
 
     def __init__(self, num_classes: int = 10, d_model: int = 128,
-                 nhead: int = 8, num_layers: int = 4, max_len: int = 5000,
-                 time_steps: int = 101):
+                 nhead: int = 8, num_layers: int = 3, dim_feedforward: int = 192,
+                 max_len: int = 5000, time_steps: int = 101):
         super().__init__()
         self.input_quant = qnn.QuantIdentity(**_ACT_PARAMS)
-        self.conv1d = qnn.QuantConv1d(
-            80, d_model, kernel_size=3, stride=1, padding=1,
+        self.conv1d = qnn.QuantConv2d(
+            80, d_model, kernel_size=(3, 1), stride=(1, 1), padding=(1, 0),
             bias=True, **_CONV_LIN_PARAMS,
         )
-        self.act_conv = nn.GELU()
+        self.dequant_conv = qnn.QuantIdentity(**_DEQUANT_PARAMS)  # → plain float
+        self.act_conv = nn.ReLU()
         self.positional_encoding = _PositionalEncoding(d_model, max_len=max_len, fixed_len=time_steps)
         self.rescale_pos = qnn.QuantIdentity(**_ACT_PARAMS)
         self.encoder = _QTransformerEncoderBlock(
             d_model=d_model, nhead=nhead, num_layers=num_layers,
+            dim_feedforward=dim_feedforward,
         )
         self.rescale_out = qnn.QuantIdentity(**_ACT_PARAMS)
         self.fc = qnn.QuantLinear(d_model, num_classes, bias=True, **_CONV_LIN_PARAMS)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, 80, T)
+        # x: (B, 80, T, 1)
         x = self.input_quant(x)
-        x = self.conv1d(x)              # (B, d_model, T) — QuantTensor
-        x = self.act_conv(x)            # GELU unwraps QuantTensor → float
+        x = self.conv1d(x)              # (B, d_model, T, 1) — QuantTensor
+        x = self.act_conv(x)            # ReLU
+        x = torch.squeeze(x, -1)       # (B, d_model, T) — via __torch_function__
         x = x.permute(0, 2, 1)         # (B, T, d_model)
         x = self.positional_encoding(x)
         x = self.rescale_pos(x)         # requantize after positional encoding
