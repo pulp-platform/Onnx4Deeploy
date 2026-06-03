@@ -41,7 +41,8 @@ class QTSDRExporter(BaseONNXExporter):
             "num_classes": 10,
             "d_model": 128,
             "nhead": 8,
-            "num_layers": 4,
+            "num_layers": 3,             # Matches SpokenDigitTransformer
+            "dim_feedforward": 192,      # d_model + d_model//2
             "max_len": 5000,
             "opset_version": 17,
             "training_strategy": "full",
@@ -64,6 +65,7 @@ class QTSDRExporter(BaseONNXExporter):
             d_model=self.model_config["d_model"],
             nhead=self.model_config["nhead"],
             num_layers=self.model_config["num_layers"],
+            dim_feedforward=self.model_config["dim_feedforward"],
             max_len=self.model_config["max_len"],
             time_steps=self.model_config["time_steps"],
         )
@@ -73,6 +75,7 @@ class QTSDRExporter(BaseONNXExporter):
             self.config["batch_size"],
             self.config["mel_bands"],
             self.config["time_steps"],
+            1,  # dummy spatial dim for Conv2d compatibility
         )
 
     def get_trainable_params(self, all_param_names: List[str]) -> List[str]:
