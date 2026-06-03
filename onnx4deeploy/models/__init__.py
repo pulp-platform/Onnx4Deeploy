@@ -16,6 +16,10 @@ from .resnet_exporter import ResNetExporter
 from .simple_mlp_exporter import SimpleMlpExporter
 from .sleep_convit_exporter import SleepConViTExporter
 from .qsleep_convit_exporter import QSleepConViTExporter
+from .mcunet_exporter import MCUNetExporter
+from .qmcunet_exporter import QMCUNetExporter
+from .tsdr_exporter import TSDRExporter
+from .qtsdr_exporter import QTSDRExporter
 
 __all__ = [
     "CCTExporter",
@@ -29,5 +33,9 @@ __all__ = [
     "MobileViTExporter",
     "MambaExporter",
     "SleepConViTExporter",
-    "QSleepConViTExporter"
+    "QSleepConViTExporter",
+    "MCUNetExporter",
+    "QMCUNetExporter",
+    "TSDRExporter",
+    "QTSDRExporter",
 ]

@@ -23,7 +23,6 @@ from typing import Any, Dict, List, Optional, Tuple
 import onnx
 import torch
 from onnx import helper
-from onnxruntime.training import artifacts
 
 from DeepQuant.Export4Deeploy import exportBrevitas
 
@@ -462,6 +461,7 @@ class BaseONNXExporter(ABC):
 
         # Generate training artifacts
         print("\n🏋️ Generating training artifacts...")
+        from onnxruntime.training import artifacts
         artifacts.generate_artifacts(
             onnx_model,
             optimizer=artifacts.OptimType.SGD,
@@ -562,14 +562,25 @@ class BaseONNXExporter(ABC):
             opset_version = self.config.get("opset_version", 12)
             onnx_model = self._export_to_onnx(model, input_tensor, opset_version)
         elif quant:
-            #load weights.
-            state_dict = torch.load(os.path.join(os.getcwd(), self.config.get("weights_path", "model_weights.pth")), map_location="cpu")
-            model.load_state_dict(state_dict, strict=False)
+            weights_path = self.config.get("weights_path", "")
+            abs_path = os.path.join(os.getcwd(), weights_path) if weights_path else ""
+            if weights_path and os.path.exists(abs_path):
+                print(f"\n📦 Loading weights: {abs_path}")
+                state_dict = torch.load(abs_path, map_location="cpu")
+                model.load_state_dict(state_dict, strict=False)
+            else:
+                print("\n📦 No weights_path found; using random weights for quantized ZO export.")
+                for name, param in model.named_parameters():
+                    if param.requires_grad:
+                        if "bias" in name:
+                            torch.nn.init.uniform_(param, a=0.01, b=0.02)
+                        else:
+                            torch.nn.init.normal_(param, mean=0.0, std=0.02)
             print("\n📤 Exporting to ONNX with quantization...")
-            # JanSno: Temporary workaround
+            # Ensure non-zero biases for numerical stability
             for name, param in model.named_parameters():
                 if param.requires_grad and "bias" in name:
-                    if torch.all(param.data) == 0:
+                    if torch.all(param.data == 0):
                         torch.nn.init.uniform_(param, a=0.01, b=0.02)
             # use DeepQuant to export to ONNX
             onnx_model = exportBrevitas(model, input_tensor, debug=False)
@@ -618,13 +629,16 @@ class BaseONNXExporter(ABC):
             output_onnx=self.paths["network_zo_train"],
             zo_config=self.config["zo"],
             noise_type=noise_type,
+            scales_path=self.config.get("scales_path", None),
         )
 
         generate_weight_update_graph(
             onnx_path=self.paths["network_infer"],
             output_path=self.paths["network_zo_update"],
             zo_config=self.config["zo"],
-            noise_type=noise_type)
+            noise_type=noise_type,
+            scales_path=self.config.get("scales_path", None),
+        )
 
         # # Load training model and add gradient outputs
         # onnx_model = onnx.load(self.paths["network_train"])
@@ -693,8 +707,17 @@ class BaseONNXExporter(ABC):
             if use_pure_python:
                 from onnx4deeploy.utils.onnx_node_implementations import run_onnx_graph
                 print("   Using pure-Python ONNX executor (custom ops present)...")
+                if mode == ExportMode.ZO_TRAINING:
+                    # Use the zo_train model (with perturbation + loss nodes)
+                    onnx_model_path = self.paths["network_zo_train"]
+                    num_classes = self.config.get("num_classes", 10)
+                    test_label = np.random.randint(0, num_classes, size=(input_shape[0], 1)).astype(np.int8)
+                    feed_dict = {"input": test_input, "label": test_label}
+                else:
+                    onnx_model_path = self.paths["network_infer"]
+                    feed_dict = {"input": test_input}
                 test_output = run_onnx_graph(
-                    self.paths["network_infer"], {"input": test_input}
+                    onnx_model_path, feed_dict
                 )
                 if not isinstance(test_output, np.ndarray):
                     test_output = np.array(test_output, dtype=np.float32)
@@ -714,10 +737,8 @@ class BaseONNXExporter(ABC):
             save_path.mkdir(parents=True, exist_ok=True)
 
             if mode == ExportMode.ZO_TRAINING:
-                test_label = np.random.randint(
-                    0, self.config["num_classes"], size=(input_shape[0], 1)
-                ).astype(np.int8)
-                print(f"   Generated test labels with shape: {test_label.shape}")
+                # test_label was already generated when running the model
+                print(f"   Using test labels with shape: {test_label.shape}")
                 np.savez(save_path / "inputs.npz", input=test_input, label=test_label)
             else:
                 np.savez(save_path / "inputs.npz", input=test_input)

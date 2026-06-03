@@ -70,7 +70,8 @@ class QSleepConViTExporter(BaseONNXExporter):
                 "seed": 42,
                 "exceptions": ["node_matmul", "node_bmm_requant", "node_bmm_1_requant"]
             },
-            "weights_path":"onnx4deeploy/models/pytorch_models/sleep_convit/qsleep_convit.pth"
+            "weights_path":"onnx4deeploy/models/pytorch_models/sleep_convit/qsleep_convit.pth",
+            "scales_path":"onnx4deeploy/models/pytorch_models/sleep_convit/qsleep_convit_scales.json"
         }
 
         self.model_config = config

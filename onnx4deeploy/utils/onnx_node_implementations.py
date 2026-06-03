@@ -78,7 +78,38 @@ def _perturb_uniform(
         seed = _scramble(global_seed + NUM_CORES * node_id + core_id)
         for i in range(chunk_start, chunk_stop):
             seed = _xorshift32(seed)
-            flat[i] += np.float32(sign * _uint32_to_signed_float(seed) * eps)
+            flat[i] += np.float32(sign * (float(seed) / float(0xFFFFFFFF) - 0.5) * eps)
+
+    return flat.reshape(data.shape)
+
+
+def _perturb_triangle(
+    data: np.ndarray,
+    global_seed: int,
+    node_id: int,
+    eps: float,
+    sign: int = 1,
+) -> np.ndarray:
+    """Triangle perturbation: (u1 - u2) * epsilon per element.
+
+    Matches C kernel which draws two uniform values per element.
+    """
+    flat = data.flatten().astype(np.float32)
+    size = flat.size
+    log2core = int(math.log2(NUM_CORES))
+
+    for core_id in range(NUM_CORES):
+        chunk = (size >> log2core) + (1 if (size & (NUM_CORES - 1)) else 0)
+        chunk_start = min(chunk * core_id, size)
+        chunk_stop = min(chunk_start + chunk, size)
+
+        rng_state = _scramble(global_seed + NUM_CORES * node_id + core_id)
+        for i in range(chunk_start, chunk_stop):
+            rng_state = _xorshift32(rng_state)
+            u1 = float(rng_state) / float(0xFFFFFFFF)
+            rng_state = _xorshift32(rng_state)
+            u2 = float(rng_state) / float(0xFFFFFFFF)
+            flat[i] += np.float32(sign * (u1 - u2) * eps)
 
     return flat.reshape(data.shape)
 
@@ -90,7 +121,10 @@ def _perturb_rademacher(
     eps: float,
     sign: int = 1,
 ) -> np.ndarray:
-    """Rademacher perturbation: each element offset by ±eps."""
+    """Rademacher perturbation: each element offset by ±eps.
+
+    Matches the C kernel which extracts 32 Rademacher samples per xorshift call.
+    """
     flat = data.flatten().astype(np.float32)
     size = flat.size
     log2core = int(math.log2(NUM_CORES))
@@ -99,12 +133,31 @@ def _perturb_rademacher(
         chunk = (size >> log2core) + (1 if (size & (NUM_CORES - 1)) else 0)
         chunk_start = min(chunk * core_id, size)
         chunk_stop = min(chunk_start + chunk, size)
+        local_size = chunk_stop - chunk_start
 
-        seed = _scramble(global_seed + NUM_CORES * node_id + core_id)
-        for i in range(chunk_start, chunk_stop):
-            seed = _xorshift32(seed)
-            rad = np.float32(1.0) if (seed & np.uint32(1)) else np.float32(-1.0)
-            flat[i] += np.float32(sign) * rad * np.float32(eps)
+        rng_state = _scramble(global_seed + NUM_CORES * node_id + core_id)
+
+        n_full_batches = local_size // 32
+        leftover = local_size % 32
+        i = chunk_start
+
+        for _ in range(n_full_batches):
+            rng_state = _xorshift32(rng_state)
+            bits = int(rng_state)
+            for _ in range(32):
+                rad = np.float32(1.0) if (bits & 1) else np.float32(-1.0)
+                flat[i] += np.float32(sign) * rad * np.float32(eps)
+                bits >>= 1
+                i += 1
+
+        if leftover > 0:
+            rng_state = _xorshift32(rng_state)
+            bits = int(rng_state)
+            for _ in range(leftover):
+                rad = np.float32(1.0) if (bits & 1) else np.float32(-1.0)
+                flat[i] += np.float32(sign) * rad * np.float32(eps)
+                bits >>= 1
+                i += 1
 
     return flat.reshape(data.shape)
 
@@ -116,7 +169,11 @@ def _perturb_normal(
     eps: float,
     sign: int = 1,
 ) -> np.ndarray:
-    """Gaussian perturbation via Box-Muller on Xorshift32 draws."""
+    """Gaussian perturbation via Box-Muller on Xorshift32 draws.
+
+    Matches the C kernel which processes elements in pairs (cos, sin)
+    from each Box-Muller transform, consuming 2 xorshift calls per pair.
+    """
     flat = data.flatten().astype(np.float32)
     size = flat.size
     log2core = int(math.log2(NUM_CORES))
@@ -125,15 +182,33 @@ def _perturb_normal(
         chunk = (size >> log2core) + (1 if (size & (NUM_CORES - 1)) else 0)
         chunk_start = min(chunk * core_id, size)
         chunk_stop = min(chunk_start + chunk, size)
+        local_size = chunk_stop - chunk_start
 
-        seed = _scramble(global_seed + NUM_CORES * node_id + core_id)
-        for i in range(chunk_start, chunk_stop):
-            seed = _xorshift32(seed)
-            u1 = max(float(seed) / float(np.iinfo(np.uint32).max), 1e-10)
-            seed = _xorshift32(seed)
-            u2 = float(seed) / float(np.iinfo(np.uint32).max) * 2.0 * math.pi
-            z = math.sqrt(-2.0 * math.log(u1)) * math.cos(u2)
-            flat[i] += np.float32(sign * z * eps)
+        rng_state = _scramble(global_seed + NUM_CORES * node_id + core_id)
+
+        # Process pairs (matching C kernel's 2-at-a-time Box-Muller)
+        n_pairs = local_size // 2
+        i = chunk_start
+        for _ in range(n_pairs):
+            rng_state = _xorshift32(rng_state)
+            u1 = max(float(rng_state) / float(0xFFFFFFFF), 1e-10)
+            rng_state = _xorshift32(rng_state)
+            u2 = float(rng_state) / float(0xFFFFFFFF)
+            mag = math.sqrt(-2.0 * math.log(u1))
+            angle = 2.0 * math.pi * u2
+            flat[i]     += np.float32(sign * mag * math.cos(angle) * eps)
+            flat[i + 1] += np.float32(sign * mag * math.sin(angle) * eps)
+            i += 2
+
+        # Remainder (odd element) — C kernel also does single-element Box-Muller
+        if local_size % 2 != 0:
+            rng_state = _xorshift32(rng_state)
+            u1 = max(float(rng_state) / float(0xFFFFFFFF), 1e-10)
+            rng_state = _xorshift32(rng_state)
+            u2 = float(rng_state) / float(0xFFFFFFFF)
+            mag = math.sqrt(-2.0 * math.log(u1))
+            angle = 2.0 * math.pi * u2
+            flat[i] += np.float32(sign * mag * math.cos(angle) * eps)
 
     return flat.reshape(data.shape)
 
@@ -155,25 +230,49 @@ def _perturb_rqs_rademacher(
 
     mul_flat = mul.flatten().astype(np.int64)
     num_out = mul_flat.size
-    # Broadcast mul across the remaining dimensions
-    elems_per = size // num_out if num_out > 0 and size >= num_out else 1
-    mul_per_elem = np.repeat(mul_flat, elems_per)
-    if mul_per_elem.size < size:
-        mul_per_elem = np.resize(mul_per_elem, size)
+    # Tile mul to match C kernel: M[i % channel_width]
+    reps = (size + num_out - 1) // num_out if num_out > 0 else 1
+    mul_per_elem = np.tile(mul_flat, reps)[:size]
+
+    S = int(math.log2(div))
+    rounding = np.int64(1 << (S - 1)) if S > 0 else np.int64(0)
 
     for core_id in range(NUM_CORES):
         chunk = (size >> log2core) + (1 if (size & (NUM_CORES - 1)) else 0)
         chunk_start = min(chunk * core_id, size)
         chunk_stop = min(chunk_start + chunk, size)
+        local_size = chunk_stop - chunk_start
 
         seed = _scramble(global_seed + NUM_CORES * node_id + core_id)
-        for i in range(chunk_start, chunk_stop):
-            seed = _xorshift32(seed)
-            rad = np.int64(1) if (seed & np.uint32(1)) else np.int64(-1)
-            delta = (rad * mul_per_elem[i]) // np.int64(div)
-            flat[i] += sign * delta
+        n_full = local_size // 32
+        leftover = local_size % 32
+        idx = chunk_start
 
-    lo = -(n_levels // 2) if signed else 0
+        # Process full batches of 32 (1 xorshift per 32 elements)
+        for _ in range(n_full):
+            seed = _xorshift32(seed)
+            bits = int(seed)
+            for _ in range(32):
+                rad = np.int64(1) if (bits & 1) else np.int64(-1)
+                m_val = np.int64(mul_per_elem[idx])
+                noise_q = (rad * m_val + rounding) >> S
+                flat[idx] += sign * noise_q
+                bits >>= 1
+                idx += 1
+
+        # Process leftover elements
+        if leftover > 0:
+            seed = _xorshift32(seed)
+            bits = int(seed)
+            for _ in range(leftover):
+                rad = np.int64(1) if (bits & 1) else np.int64(-1)
+                m_val = np.int64(mul_per_elem[idx])
+                noise_q = (rad * m_val + rounding) >> S
+                flat[idx] += sign * noise_q
+                bits >>= 1
+                idx += 1
+
+    lo = -(n_levels // 2) + 1 if signed else 0
     hi = (n_levels // 2) - 1 if signed else n_levels - 1
     flat = np.clip(flat, lo, hi)
     return flat.reshape(data.shape).astype(data.dtype)
@@ -196,24 +295,56 @@ def _perturb_rqs_uniform(
 
     mul_flat = mul.flatten().astype(np.int64)
     num_out = mul_flat.size
-    elems_per = size // num_out if num_out > 0 and size >= num_out else 1
-    mul_per_elem = np.repeat(mul_flat, elems_per)
-    if mul_per_elem.size < size:
-        mul_per_elem = np.resize(mul_per_elem, size)
+    # Tile mul to match C kernel: M[i % channel_width]
+    reps = (size + num_out - 1) // num_out if num_out > 0 else 1
+    mul_per_elem = np.tile(mul_flat, reps)[:size]
 
     for core_id in range(NUM_CORES):
         chunk = (size >> log2core) + (1 if (size & (NUM_CORES - 1)) else 0)
         chunk_start = min(chunk * core_id, size)
         chunk_stop = min(chunk_start + chunk, size)
 
-        seed = _scramble(global_seed + NUM_CORES * node_id + core_id)
-        for i in range(chunk_start, chunk_stop):
-            seed = _xorshift32(seed)
-            rand_f = _uint32_to_signed_float(seed)
-            delta = int(rand_f * float(mul_per_elem[i])) // div
-            flat[i] += sign * delta
+        S = int(math.log2(div))
+        rounding = np.int64(1 << (S - 1)) if S > 0 else np.int64(0)
+        threshold = 255
 
-    lo = -(n_levels // 2) if signed else 0
+        seed = _scramble(global_seed + NUM_CORES * node_id + core_id)
+        n_full = (chunk_stop - chunk_start) // 4
+        leftover_count = (chunk_stop - chunk_start) % 4
+        idx = chunk_start
+
+        # Process batches of 4 (rejection-sampled ternary noise)
+        for _ in range(n_full):
+            while True:
+                seed = _xorshift32(seed)
+                rw = int(seed)
+                b0 = (rw >> 0) & 0xFF
+                b1 = (rw >> 8) & 0xFF
+                b2 = (rw >> 16) & 0xFF
+                b3 = (rw >> 24) & 0xFF
+                if b0 < threshold and b1 < threshold and b2 < threshold and b3 < threshold:
+                    break
+            n_int = [(b0 % 3) - 1, (b1 % 3) - 1, (b2 % 3) - 1, (b3 % 3) - 1]
+            for j in range(4):
+                m_val = np.int64(mul_per_elem[idx + j])
+                noise_q = (np.int64(n_int[j]) * m_val + rounding) >> S
+                flat[idx + j] += sign * noise_q
+            idx += 4
+
+        # Leftover
+        for _ in range(leftover_count):
+            while True:
+                seed = _xorshift32(seed)
+                u = int(seed) & 0xFF
+                if u < threshold:
+                    break
+            n_int_val = (u % 3) - 1
+            m_val = np.int64(mul_per_elem[idx])
+            noise_q = (np.int64(n_int_val) * m_val + rounding) >> S
+            flat[idx] += sign * noise_q
+            idx += 1
+
+    lo = -(n_levels // 2) + 1 if signed else 0
     hi = (n_levels // 2) - 1 if signed else n_levels - 1
     flat = np.clip(flat, lo, hi)
     return flat.reshape(data.shape).astype(data.dtype)
@@ -332,12 +463,31 @@ def _exec_standard(op: str, inputs: List, attrs: Dict[str, Any]) -> List[np.ndar
             A = A.T
         if int(attrs.get("transB", 0)):
             B = B.T
-        return [(alpha * np.matmul(A, B) + beta * C).astype(A.dtype)]
+        if np.issubdtype(A.dtype, np.integer):
+            # Integer path: accumulate in int32 (matches C kernel behavior)
+            result = np.matmul(A.astype(np.int32), B.astype(np.int32))
+            if not isinstance(C, float):
+                result = result + C.astype(np.int32)
+            return [result]
+        else:
+            return [(alpha * np.matmul(A, B) + beta * C).astype(A.dtype)]
 
     if op == "Conv":
         x, w = inputs[0], inputs[1]
         b = inputs[2] if len(inputs) > 2 and inputs[2] is not None else None
         groups = int(attrs.get("group", 1))
+        # Promote 1-D conv (NCL) to 2-D (NC1L) so the same kernel handles both.
+        squeezed = x.ndim == 3
+        if squeezed:
+            x = x[:, :, np.newaxis, :]   # (N, C, 1, L)
+            w = w[:, :, np.newaxis, :]   # (C_out, C_in_pg, 1, kL)
+            raw_pads = list(attrs.get("pads", [0, 0]))
+            raw_strides = list(attrs.get("strides", [1]))
+            raw_dils = list(attrs.get("dilations", [1]))
+            attrs = dict(attrs,
+                         pads=[0, raw_pads[0], 0, raw_pads[1]],
+                         strides=[1, raw_strides[0]],
+                         dilations=[1, raw_dils[0]])
         dilations = list(attrs.get("dilations", [1, 1]))
         strides = list(attrs.get("strides", [1, 1]))
         pads = list(attrs.get("pads", [0, 0, 0, 0]))
@@ -349,12 +499,17 @@ def _exec_standard(op: str, inputs: List, attrs: Dict[str, Any]) -> List[np.ndar
         pH_b, pW_r = pads[2], pads[3]
         H_out = (H + pH_t + pH_b - dH * (kH - 1) - 1) // sH + 1
         W_out = (W + pW_l + pW_r - dW * (kW - 1) - 1) // sW + 1
+        # Use int32 accumulation for integer inputs, float32 for float
+        if np.issubdtype(x.dtype, np.integer):
+            acc_dtype = np.int32
+        else:
+            acc_dtype = np.float32
         x_pad = np.pad(x, ((0,0),(0,0),(pH_t,pH_b),(pW_l,pW_r)))
-        out = np.zeros((N, C_out, H_out, W_out), dtype=np.float32)
+        out = np.zeros((N, C_out, H_out, W_out), dtype=acc_dtype)
         cpp = C_out // groups
         for g in range(groups):
-            xi = x_pad[:, g*C_in_pg:(g+1)*C_in_pg]
-            wg = w[g*cpp:(g+1)*cpp]
+            xi = x_pad[:, g*C_in_pg:(g+1)*C_in_pg].astype(acc_dtype)
+            wg = w[g*cpp:(g+1)*cpp].astype(acc_dtype)
             for oc in range(cpp):
                 for oh in range(H_out):
                     for ow in range(W_out):
@@ -364,7 +519,9 @@ def _exec_standard(op: str, inputs: List, attrs: Dict[str, Any]) -> List[np.ndar
                         out[:, g*cpp+oc, oh, ow] = np.sum(
                             patch * wg[oc], axis=(1, 2, 3))
         if b is not None:
-            out += b[np.newaxis, :, np.newaxis, np.newaxis]
+            out += b[np.newaxis, :, np.newaxis, np.newaxis].astype(acc_dtype)
+        if squeezed:
+            out = out[:, :, 0, :]   # (N, C_out, 1, L_out) → (N, C_out, L_out)
         return [out]
 
     if op == "BatchNormalization":
@@ -406,7 +563,8 @@ def _exec_standard(op: str, inputs: List, attrs: Dict[str, Any]) -> List[np.ndar
         kH, kW = kernel[0], kernel[1]
         sH, sW = strides[0], strides[1]
         pH_t, pW_l, pH_b, pW_r = pads[0], pads[1], pads[2], pads[3]
-        xp = np.pad(x, ((0,0),(0,0),(pH_t,pH_b),(pW_l,pW_r)), constant_values=-np.inf)
+        fill = np.finfo(x.dtype).min if np.issubdtype(x.dtype, np.floating) else np.iinfo(x.dtype).min
+        xp = np.pad(x, ((0,0),(0,0),(pH_t,pH_b),(pW_l,pW_r)), constant_values=fill)
         H_out = (H + pH_t + pH_b - kH) // sH + 1
         W_out = (W + pW_l + pW_r - kW) // sW + 1
         out = np.stack([[
@@ -471,7 +629,8 @@ def _exec_standard(op: str, inputs: List, attrs: Dict[str, Any]) -> List[np.ndar
         if len(inputs) > 1 and inputs[1] is not None:
             axes = sorted(int(a) for a in inputs[1].flatten())
         else:
-            axes = sorted(attrs.get("axes", []))
+            raw = attrs.get("axes", [])
+            axes = sorted([raw] if isinstance(raw, int) else raw)
         for ax in axes:
             x = np.expand_dims(x, axis=ax)
         return [x]
@@ -615,7 +774,8 @@ def _exec_standard(op: str, inputs: List, attrs: Dict[str, Any]) -> List[np.ndar
             nll = -np.sum(lp * labels, axis=-1)
         red = attrs.get("reduction", "mean")
         loss = np.mean(nll) if red == "mean" else (np.sum(nll) if red == "sum" else nll)
-        return [np.array(loss, dtype=np.float32), lp.astype(np.float32)]
+        # Return log_prob as first output (matches Deeploy C code which outputs log-softmax)
+        return [lp.astype(np.float32), np.array(loss, dtype=np.float32)]
 
     raise NotImplementedError(f"Standard ONNX op '{op}' is not implemented in run_onnx_graph")
 
@@ -624,7 +784,7 @@ def _exec_standard(op: str, inputs: List, attrs: Dict[str, Any]) -> List[np.ndar
 # Deeploy custom ops  (ai.onnx.contrib)
 # ---------------------------------------------------------------------------
 
-def _exec_deeploy(op: str, inputs: List, attrs: Dict[str, Any]) -> List[np.ndarray]:
+def _exec_deeploy(op: str, inputs: List, attrs: Dict[str, Any], add_is_initializer: bool = True) -> List[np.ndarray]:
     if op == "Quant":
         x = inputs[0].astype(np.float64)
         scale = inputs[1].astype(np.float64)
@@ -649,11 +809,51 @@ def _exec_deeploy(op: str, inputs: List, attrs: Dict[str, Any]) -> List[np.ndarr
         if div_attr is None:
             raise ValueError("RequantShift missing 'div' tensor attribute")
         div = int(div_attr.flat[0]) if hasattr(div_attr, "flat") else int(div_attr)
+        log2D = int(np.round(np.log2(div)))
         bits = int(attrs.get("out_bits", 8))
         signed = bool(attrs.get("signed", 1))
-        qmin = -(2**(bits-1)) if signed else 0
-        qmax = (2**(bits-1))-1 if signed else (2**bits)-1
-        return [np.clip((x * mul + add) // div, qmin, qmax).astype(np.int8 if signed else np.uint8)]
+        n_levels_attr = attrs.get("n_levels", None)
+        if n_levels_attr is not None:
+            n_levels = int(n_levels_attr.flat[0]) if hasattr(n_levels_attr, "flat") else int(n_levels_attr)
+        else:
+            n_levels = 2**bits
+        if signed:
+            qmin = -(n_levels // 2)
+            qmax = (n_levels // 2) - 1
+        else:
+            qmin = 0
+            qmax = n_levels - 1
+        # mul/add may be per-channel vectors of shape (C,); reshape for N-D broadcast
+        # NHWC: channel is last dim; NCHW: channel is dim 1
+        if x.ndim > 1 and mul.ndim == 1:
+            if mul.shape[0] == x.shape[-1]:
+                # NHWC layout
+                reshape = (1,) * (x.ndim - 1) + (-1,)
+            elif mul.shape[0] == x.shape[1]:
+                # NCHW layout
+                reshape = (1, -1) + (1,) * (x.ndim - 2)
+            else:
+                reshape = None
+            if reshape is not None:
+                mul = mul.reshape(reshape)
+                add = add.reshape(reshape)
+        # Match C fused kernel (pulp_nn_bn_quant_i8) which uses int32 arithmetic:
+        #   int32_t val = (k * phi) + lambda;   // int32 with wrapping overflow
+        #   result = val >> d;
+        # Only add rounding when add is a constant initializer.
+        # For RQSRad, add comes from a perturbation node (not an initializer),
+        # so the C merge pass cannot bake rounding in -> kernel just truncates.
+        if add_is_initializer:
+            rounding = np.int32(1 << (log2D - 1)) if log2D > 0 else np.int32(0)
+        else:
+            rounding = np.int32(0)
+        x32 = x.astype(np.int32)
+        mul32 = mul.astype(np.int32)
+        add32 = add.astype(np.int32)
+        rounding32 = np.int32(rounding)
+        intermediate = x32 * mul32 + add32 + rounding32  # int32 wrapping overflow matches C
+        result = intermediate >> np.int32(log2D)
+        return [np.clip(result, qmin, qmax).astype(np.int8 if signed else np.uint8)]
 
     raise NotImplementedError(f"Deeploy op '{op}' not implemented")
 
@@ -675,7 +875,7 @@ def _exec_mezo(op: str, inputs: List, attrs: Dict[str, Any]) -> List[np.ndarray]
     if op == "PerturbNormal":
         return [_perturb_normal(inputs[0].astype(np.float32), seed, node_id, eps, sign)]
     if op == "PerturbTriangle":
-        return [_perturb_uniform(inputs[0].astype(np.float32), seed, node_id, eps, sign)]
+        return [_perturb_triangle(inputs[0].astype(np.float32), seed, node_id, eps, sign)]
     if op == "PerturbEggroll":
         # Generates a Rademacher column vector of the requested shape
         shape = [int(d) for d in inputs[0].flatten()]
@@ -730,7 +930,9 @@ def run_onnx_graph(
     values: Dict[str, np.ndarray] = {}
     values.update(inputs)
 
+    _initializer_names = set()
     for init in graph.initializer:
+        _initializer_names.add(init.name)
         if init.name not in values:
             values[init.name] = numpy_helper.to_array(init)
 
@@ -765,7 +967,11 @@ def run_onnx_graph(
             if domain in ("", "ai.onnx"):
                 outs = _exec_standard(op, node_inputs, attrs)
             elif domain == "ai.onnx.contrib":
-                outs = _exec_deeploy(op, node_inputs, attrs)
+                # For RequantShift, check if the 'add' input (3rd) is an initializer
+                _add_is_init = True
+                if op == "RequantShift" and len(node.input) >= 3:
+                    _add_is_init = node.input[2] in _initializer_names
+                outs = _exec_deeploy(op, node_inputs, attrs, add_is_initializer=_add_is_init)
             elif domain == "mezo" or (domain == "com.microsoft" and op in _MEZO_OPS):
                 outs = _exec_mezo(op, node_inputs, attrs)
             elif domain == "com.microsoft":

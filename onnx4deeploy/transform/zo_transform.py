@@ -11,7 +11,7 @@ from onnx import TensorProto, helper, shape_inference
 from onnx4deeploy.transform.model_transform import ensure_all_tensor_shapes
 from DeepQuant.QuantDequantOnnx import Quant, Dequant, RequantShift
 
-def generate_zo_graph(inference_onnx:str, output_onnx:str, zo_config:dict, noise_type: str) -> None:
+def generate_zo_graph(inference_onnx:str, output_onnx:str, zo_config:dict, noise_type: str, scales_path: str = None) -> None:
     """ Generate MeZO ONNX graph for model based on its inference onnx"""
 
     epsilon, seed, exceptions = zo_config["epsilon"], zo_config["seed"], zo_config.get("exceptions", [])
@@ -23,17 +23,60 @@ def generate_zo_graph(inference_onnx:str, output_onnx:str, zo_config:dict, noise
                               epsilon=epsilon,
                               seed=seed,
                               noise_type=noise_type,
-                              exceptions=exceptions)
+                              exceptions=exceptions,
+                              scales_path=scales_path)
 
     ensure_all_tensor_shapes(model_path=output_onnx, output_path=output_onnx)
     append_cross_entropy_loss(output_onnx, output_onnx, label_name='label')
 
-def generate_weight_update_graph(onnx_path: str, output_path: str, zo_config: dict, noise_type: str) -> None:
+def _get_weight_scale(init_name: str, init_tensor, quant_scales: dict) -> np.ndarray:
+    """Get per-channel quantization scale for an initializer.
+
+    Tries to find a matching Brevitas scale from quant_scales JSON.
+    Falls back to step_size = 1/quant_max (assumes float weights in [-1, 1]).
+    """
+    import re
+    arr = onnx.numpy_helper.to_array(init_tensor)
+    is_bias = '_add' in init_name or 'bias' in init_name
+
+    if quant_scales:
+        suffix = ".bias_quant" if is_bias else ".weight_quant"
+        # First try: match by number of output channels
+        for key, val in quant_scales.items():
+            if key.endswith(suffix):
+                scale_arr = np.array(val).flatten()
+                n_out = arr.shape[0]
+                if scale_arr.shape[0] == n_out:
+                    return scale_arr
+        # Second try: match by layer order from init_name index
+        scale_keys = [k for k in quant_scales if k.endswith(suffix)]
+        m = re.search(r'_(\d+)_(?:weight|add)$', init_name)
+        if m:
+            idx = int(m.group(1))
+        elif 'linear' in init_name or 'fc' in init_name:
+            idx = len(scale_keys) - 1
+        else:
+            idx = 0
+        if idx < len(scale_keys):
+            return np.array(quant_scales[scale_keys[idx]]).flatten()
+
+    # Fallback: step_size = 1/quant_max (weights assumed to span [-1, 1])
+    quant_max = 127 if not is_bias else (2**31 - 1)
+    n_out = arr.shape[0]
+    return np.ones(n_out, dtype=np.float64) / quant_max
+
+def generate_weight_update_graph(onnx_path: str, output_path: str, zo_config: dict, noise_type: str, scales_path: str = None) -> None:
     """
     Generates a weight update ONNX graph: for each weight/bias, creates a perturbation node
     that updates the initializer in-place. No inputs, no outputs, just perturbation nodes.
     """
     epsilon, seed, exceptions = zo_config["epsilon"], zo_config["seed"], zo_config.get("exceptions", [])
+
+    quant_scales = {}
+    if scales_path is not None and os.path.exists(scales_path):
+        with open(scales_path, "r") as f:
+            quant_scales = json.load(f)
+        print(f"  Loaded quantization scales from: {scales_path}")
 
     model = onnx.load(onnx_path)
     initializers = [init for init in model.graph.initializer if ("weight" in init.name or "bias" in init.name) and init.name not in exceptions]
@@ -182,23 +225,29 @@ def generate_weight_update_graph(onnx_path: str, output_path: str, zo_config: di
             perturbation_counter += 1
 
         elif noise_type == "rqs_rademacher":        
-            # compute mul factor from scale.
-            scale = np.max(np.abs(onnx.numpy_helper.to_array(init)), axis=tuple(range(1, len(init.dims))), keepdims=True)
+            # compute mul factor from per-channel quantization scale
+            weight_scale = _get_weight_scale(init.name, init, quant_scales)
             epsilon = 0.01
             # Use different scaling for weights (8-bit) and biases (32-bit)
             if '_add' in init.name:
                 quant_max = 2**31 - 1
-                mul = np.round(epsilon / (scale / quant_max) * (2**31)).astype(np.int32)  # quantized multiplier for perturbation
+                # mul = round(epsilon / weight_scale * div)
+                mul = np.round(epsilon / weight_scale * (2**31)).astype(np.int32)
 
             else:
                 quant_max = 127
-                mul = np.round(epsilon / (scale / quant_max) * (2**15)).astype(np.int64)  # quantized multiplier for perturbation
+                # mul = round(epsilon / weight_scale * div)
+                mul = np.round(epsilon / weight_scale * (2**15)).astype(np.int64)
             init_mul = helper.make_tensor(
                 name=f"{init.name}_mul",
                 data_type=TensorProto.FLOAT,
                 dims=[mul.shape[0]],
                 vals=mul
             )
+            # _add tensors are int32 pre-shift bias: use 32-bit div/n_levels, no clamp
+            is_bias_add = '_add' in init.name
+            node_div    = 2**31 if is_bias_add else 2**15
+            node_nlevels = 2**32 if is_bias_add else 256
             node = helper.make_node(
                 "RQSPerturbRademacher",
                 inputs=[init.name, f"{init.name}_mul"],
@@ -208,8 +257,8 @@ def generate_weight_update_graph(onnx_path: str, output_path: str, zo_config: di
                 idx=perturbation_counter,
                 seed=seed,
                 signed=1,
-                div=2**15,
-                n_levels=256,
+                div=node_div,
+                n_levels=node_nlevels,
                 doc_string="y = x + epsilon * RQSRandomRademacher(x, seed)"
             )
             nodes.append(node)
@@ -218,15 +267,11 @@ def generate_weight_update_graph(onnx_path: str, output_path: str, zo_config: di
             
         elif noise_type == "rqs_uniform":
             
-             # compute mul factor from scale.
-            scale = np.max(np.abs(onnx.numpy_helper.to_array(init)), axis=tuple(range(1, len(init.dims))), keepdims=True)
+            # compute mul factor from per-channel quantization scale
+            weight_scale = _get_weight_scale(init.name, init, quant_scales)
             epsilon = 0.01
-            # Use different scaling for weights (8-bit) and biases (32-bit)
-            if '_add' in init.name:
-                quant_max = 2**31 - 1
-            else:
-                quant_max = 127.0
-            mul = np.round(epsilon / (scale / quant_max) * (2**15)).astype(np.int32) 
+            # mul = round(epsilon / weight_scale * div)
+            mul = np.round(epsilon / weight_scale * (2**15)).astype(np.int32) 
             init_mul = helper.make_tensor(
                 name=f"{init.name}_mul",
                 data_type=TensorProto.FLOAT,
@@ -234,6 +279,19 @@ def generate_weight_update_graph(onnx_path: str, output_path: str, zo_config: di
                 vals=mul
             )
             
+            # _add tensors are int32 pre-shift bias: use 32-bit div/n_levels, no clamp
+            is_bias_add_u = '_add' in init.name
+            u_div    = 2**31 if is_bias_add_u else 2**15
+            u_nlevels = 2**32 if is_bias_add_u else 256
+            # Recompute mul with correct div for bias (overrides the 2**15 mul above)
+            if is_bias_add_u:
+                mul = np.round(epsilon / weight_scale * (2**31)).astype(np.int32)
+                init_mul = helper.make_tensor(
+                    name=f"{init.name}_mul",
+                    data_type=TensorProto.FLOAT,
+                    dims=mul.shape,
+                    vals=mul
+                )
             node = helper.make_node(
                 "RQSPerturbUniform",
                 inputs=[init.name, f"{init.name}_mul"],
@@ -243,8 +301,8 @@ def generate_weight_update_graph(onnx_path: str, output_path: str, zo_config: di
                 seed=seed,
                 idx=perturbation_counter,
                 signed=1,
-                div=2**15,
-                n_levels=256,
+                div=u_div,
+                n_levels=u_nlevels,
                 doc_string="y = x + epsilon * RQSRandomUniform(x, seed)"
             )
             nodes.append(node)
@@ -279,7 +337,8 @@ def inject_perturbation_nodes(
     epsilon: float = 0.01,
     seed: float = 42.0,
     noise_type: str = "gaussian",
-    exceptions: list[str] = []
+    exceptions: list[str] = [],
+    scales_path: str = None
 ) -> None:
     """
     This function inserts statically-seeded random operators. The unique seed for each
@@ -294,6 +353,15 @@ def inject_perturbation_nodes(
         seed: A base seed to generate unique, deterministic seeds for each operator.
         noise_type: The type of random distribution to use ('gaussian' or 'uniform').
     """
+    # Load quantization scales if provided
+    quant_scales = {}
+    if scales_path is not None and os.path.exists(scales_path):
+        with open(scales_path, "r") as f:
+            quant_scales = json.load(f)
+        print(f"  Loaded quantization scales from: {scales_path}")
+
+    # _get_weight_scale is defined at module level
+
     # Load original ONNX model
     p = Path(onnx_path)
 
@@ -429,41 +497,22 @@ def inject_perturbation_nodes(
                             perturbation_counter += 1
 
                         elif noise_type == "rqs_rademacher":
-                            scale = np.max(np.abs(onnx.numpy_helper.to_array(original_weight_tensor)), 
-                                           axis=tuple(range(1, len(original_weight_tensor.dims))), keepdims=True)
                             epsilon = 0.01
-                            # compute mul factor from scale. input 1 is normally the weight tensor.
+                            weight_scale = _get_weight_scale(input_name, original_weight_tensor, quant_scales)
+                            # compute mul = round(epsilon / weight_scale * div)
                             if '_add' in input_name:
-                                print(F"found add in name: {input_name}, treating as bias with 32-bit quantization")
-                                quant_max = 2**31 - 1
-                                # For biases, inherit the 'div' from the RequantShift node itself
-                                print(F"NOde: {node.name}, op_type: {node.op_type}, attributes: {node.attribute}")
-                                # CORRECT: 'div' is a TENSOR attribute, not an INT attribute.
+                                # For biases: inherit div from the RequantShift node
                                 div_tensor_proto = next((attr.t for attr in node.attribute if attr.name == 'div'), None)
                                 if div_tensor_proto is None:
                                     raise ValueError(f"Could not find 'div' TENSOR attribute on RequantShift node: {node.name}")
-                                
-                                # Convert the TensorProto to a numpy array and get the scalar value.
                                 producer_div = onnx.numpy_helper.to_array(div_tensor_proto).item()
-                                producer_mul_tensor = None
-                                if len(node.input) > 1:
-                                    mul_input_name = node.input[1]
-                                    producer_mul_tensor = next((init for init in new_initializers if init.name == mul_input_name), None)
-                                if producer_div is None:
-                                    raise ValueError(f"Could not find 'div' attribute on RequantShift node: {node.name}")
-                                print(F"producer_div: {producer_div}, producer_mul: {producer_mul_tensor}")
-
-                                div=producer_div
-                                n_levels = 2**32
-                                producer_mul = onnx.numpy_helper.to_array(producer_mul_tensor)
-
-                                mul = np.round(epsilon *producer_mul).astype(np.int32)  # quantized multiplier for perturbation
-
+                                div = producer_div
+                                n_levels = 2**32  # int32 pre-shift bias, no clamp
+                                mul = np.round(epsilon / weight_scale * div).astype(np.int32)
                             else:
-                                quant_max = 127
                                 div = 2**15
                                 n_levels = 2**8
-                                mul = np.round(epsilon / (scale / quant_max) * (div)).astype(np.int64)
+                                mul = np.round(epsilon / weight_scale * div).astype(np.int64)
                             init_mul = helper.make_tensor(
                                 name=f"{input_name}_mul",
                                 data_type=TensorProto.FLOAT,
@@ -489,23 +538,20 @@ def inject_perturbation_nodes(
                             perturbation_counter += 1
                             
                         elif noise_type == "rqs_uniform":
-                            scale = np.max(np.abs(onnx.numpy_helper.to_array(original_weight_tensor)), 
-                                            axis=tuple(range(1, len(original_weight_tensor.dims))), keepdims=True)
-                            # compute mul factor from scale. input 1 is normally the weight tensor.
+                            epsilon = 0.01
+                            weight_scale = _get_weight_scale(input_name, original_weight_tensor, quant_scales)
+                            # compute mul = round(epsilon / weight_scale * div)
                             if '_add' in input_name:
-                                quant_max = 2**31 - 1
                                 producer_div = next((attr.i for attr in node.attribute if attr.name == 'div'), None)
                                 if producer_div is None:
                                     raise ValueError(f"Could not find 'div' attribute on RequantShift node: {node.name}")
                                 div = producer_div
-                                n_levels = 2**8
-                                mul = np.round(epsilon / (scale / quant_max) * (2**31)).astype(np.int32)  # quantized multiplier for perturbation
-
+                                n_levels = 2**32  # int32 pre-shift bias, no clamp
+                                mul = np.round(epsilon / weight_scale * div).astype(np.int32)
                             else:
-                                quant_max = 127
                                 div = 2**15
                                 n_levels = 2**8
-                                mul = np.round(epsilon / (scale / quant_max) * (2**15)).astype(np.int64)  # quantized multiplier for perturbation
+                                mul = np.round(epsilon / weight_scale * div).astype(np.int64)
                             init_mul = helper.make_tensor(
                                 name=f"{input_name}_mul",
                                 data_type=TensorProto.FLOAT,

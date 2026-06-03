@@ -63,7 +63,8 @@ class QLiteCnnExporter(BaseONNXExporter):
                 "epsilon": 0.1,
                 "seed": 42
             },
-            "weights_path":"onnx4deeploy/models/pytorch_models/lightweight_cnn/qlite_cnn.pth"
+            "weights_path":"onnx4deeploy/models/pytorch_models/lightweight_cnn/qlite_cnn.pth",
+            "scales_path":"onnx4deeploy/models/pytorch_models/lightweight_cnn/qlite_cnn_scales.json"
         }
 
         self.model_config = config

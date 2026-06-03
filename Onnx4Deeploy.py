@@ -42,7 +42,11 @@ def list_available_models():
         ResNetExporter,
         SimpleMlpExporter,
         SleepConViTExporter,
-        QSleepConViTExporter
+        QSleepConViTExporter,
+        MCUNetExporter,
+        QMCUNetExporter,
+        TSDRExporter,
+        QTSDRExporter,
     )
 
     models = {
@@ -152,8 +156,33 @@ def list_available_models():
             "class": QSleepConViTExporter,
             "description": "QLite SleepConViT (Quantized Vision Transformer for Sleep Stage Classification)",
             "input_shape": "(B, 1, 3000)",
-            "classes": 5
-        }
+            "classes": 5,
+        },
+        # MCUNet and T-SDR models
+        "MCUNet-In1": {
+            "class": MCUNetExporter,
+            "description": "MCUNet-In1 (MobileNet-NAS for CIFAR-10, 96x96 RGB)",
+            "input_shape": "(B, 3, 96, 96)",
+            "classes": 10,
+        },
+        "QMCUNet-In1": {
+            "class": QMCUNetExporter,
+            "description": "QMCUNet-In1 (Brevitas INT8 MCUNet-In1, CIFAR-10, 96x96 RGB)",
+            "input_shape": "(B, 3, 96, 96)",
+            "classes": 10,
+        },
+        "TSDR": {
+            "class": TSDRExporter,
+            "description": "T-SDR SpokenNumberRecognizer (Transformer for spoken digit recognition)",
+            "input_shape": "(B, 80, 101)",
+            "classes": 10,
+        },
+        "QTSDR": {
+            "class": QTSDRExporter,
+            "description": "Q-T-SDR INT8 SpokenNumberRecognizer (Brevitas quantized)",
+            "input_shape": "(B, 80, 101)",
+            "classes": 10,
+        },
     }
     return models
 
@@ -215,7 +244,7 @@ def generate_operator(operator_name: str, output_path: Optional[str] = None):
 
     # Dynamically import operator class
     try:
-        # Try multiple class name patterns
+        # Try multiple class name patterns (case-insensitive suffix match used below)
         possible_class_names = [
             f"{operator_name}OperatorTest",  # Standard pattern: ReluOperatorTest
             f"{operator_name}Operator",  # Alternative: ReluOperator
@@ -229,6 +258,8 @@ def generate_operator(operator_name: str, output_path: Optional[str] = None):
             f"{operator_name.lower()}_exporter",  # relu_exporter
         ]
 
+        import inspect
+
         operator_class = None
         for module_suffix in possible_module_names:
             if operator_class:
@@ -236,12 +267,21 @@ def generate_operator(operator_name: str, output_path: Optional[str] = None):
             module_name = f"onnx4deeploy.operators.{module_suffix}"
             try:
                 module = __import__(module_name, fromlist=["*"])
+                # First try exact name candidates
                 for class_name in possible_class_names:
                     try:
                         operator_class = getattr(module, class_name)
                         break
                     except AttributeError:
                         continue
+                # Fallback: case-insensitive scan for *OperatorTest classes
+                if not operator_class:
+                    target = operator_name.lower()
+                    for name, obj in inspect.getmembers(module, inspect.isclass):
+                        if (name.lower().startswith(target) and
+                                name.lower().endswith("operatortest")):
+                            operator_class = obj
+                            break
             except ImportError:
                 continue
 
