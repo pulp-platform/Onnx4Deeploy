@@ -115,21 +115,13 @@ class _QEncoderLayer(nn.Module):
         self.rescale2 = qnn.QuantIdentity(**_ACT_PARAMS)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Pre-norm attention with quantized residual
-        _x = x
-        x_ln = self.norm1(x)
-        attn_out, _ = self.mha(x_ln, x_ln, x_ln, need_weights=False)
-        attn_out = self.rescale1(attn_out)
-        _x = self.rescale1(_x)
-        x = attn_out + _x
+        # Post-norm attention with quantized residual (matches QEncoderLayer)
+        attn_out, _ = self.mha(x, x, x, need_weights=False)
+        x = self.norm1(self.rescale1(x) + self.rescale1(attn_out))
 
-        # Pre-norm FFN with quantized residual
-        _x = x
-        x_ln = self.norm2(x)
-        ff = self.linear2(self.act(self.linear1(x_ln)))
-        ff = self.rescale2(ff)
-        _x = self.rescale2(_x)
-        x = ff + _x
+        # Post-norm FFN with quantized residual
+        ff = self.linear2(self.act(self.linear1(x)))
+        x = self.norm2(self.rescale2(x) + self.rescale2(ff))
         return x
 
 

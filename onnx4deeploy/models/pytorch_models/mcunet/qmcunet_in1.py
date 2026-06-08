@@ -38,26 +38,18 @@ _CONV_ACT = dict(
 )
 
 # Projection convolutions (no activation after, end of MB block).
-# input_quant requantises the float coming out of the preceding activation;
-# no output_quant so the output is plain float for the next block.
+# output_quant produces a RequantShift (int8→int8); return_quant_tensor=True
+# so that torch.mean on the QuantTensor output triggers the scalar Dequant
+# (int8→float) before the FP32 classifier head.
 _CONV_PROJ = dict(
     weight_bit_width=8,
     bias_quant=Int32Bias,
     input_quant=Int8ActPerTensorFloat,
     weight_quant=Int8WeightPerChannelFloat,
-    output_quant=None,
-    return_quant_tensor=False,
+    output_quant=Int8ActPerTensorFloat,
+    return_quant_tensor=True,
 )
 
-# Final linear classifier.
-_LIN = dict(
-    weight_bit_width=8,
-    bias_quant=Int32Bias,
-    input_quant=Int8ActPerTensorFloat,
-    weight_quant=Int8WeightPerChannelFloat,
-    output_quant=None,
-    return_quant_tensor=False,
-)
 
 
 # ---------------------------------------------------------------------------
@@ -159,7 +151,7 @@ class QMCUNetIn1(nn.Module):
             _QMBBlock(*cfg) for cfg in _BLOCK_CONFIGS
         ])
         # Global average pool then classifier.
-        self.fc = qnn.QuantLinear(160, num_classes, bias=True, **_LIN)
+        self.fc = nn.Linear(160, num_classes, bias=True)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         x = self.input_quant(x)

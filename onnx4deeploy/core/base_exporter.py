@@ -374,11 +374,21 @@ class BaseONNXExporter(ABC):
 
         # Fix duplicate initializer/node-output names introduced by
         # onnx.save's write_external_data_tensors on gs-exported models.
+        # Also clean up graph output tensors wrongly left in value_info without
+        # shape info: onnx-graphsurgeon prefers value_info over graph.output, so
+        # a shapeless value_info entry hides the correct shape in graph.output.
+        _m = onnx.load(self.paths["network"])
         if quant:
-            _m = onnx.load(self.paths["network"])
             _m = fix_duplicate_tensor_names(_m)
-            with open(self.paths["network"], "wb") as _f:
-                _f.write(_m.SerializeToString())
+        _output_names = {o.name for o in _m.graph.output}
+        _clean_vi = [vi for vi in _m.graph.value_info
+                     if vi.name not in _output_names
+                     or vi.type.tensor_type.HasField("shape")]
+        if len(_clean_vi) != len(_m.graph.value_info):
+            del _m.graph.value_info[:]
+            _m.graph.value_info.extend(_clean_vi)
+        with open(self.paths["network"], "wb") as _f:
+            _f.write(_m.SerializeToString())
 
         # Save test input/output data if method is implemented
         if hasattr(self, "save_test_data"):
