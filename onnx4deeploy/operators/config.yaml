@@ -145,3 +145,28 @@ maxpoolgrad:
   strides: [2, 2]
   pads: [0, 0, 0, 0]
   ceil_mode: 0
+
+# NE16 (GAP9 HWPE) requantized conv benchmarks -- one per native kernel mode.
+# c_in multiple of 16 (TP_IN), c_out multiple of 32 (TP_OUT, 16 for depthwise)
+# keeps the MAC array fully fed; see the NE16 architecture notes.
+ne16_rqs_conv2d:
+  defaults:
+    log2d: 16          # RequantShift div = 2**log2d
+    signed: 1          # int8 output; the INPUT is always unsigned (NE16 has no
+                       # signed-input flag in CONFIG0)
+  modes:
+    dense:             # CONV3x3, group == 1 -- NE16's sweet spot
+      c_in: 64
+      c_out: 64
+      height: 32
+      width: 32
+    dw:                # CONV3x3_DW, group == c_in == c_out
+      c_in: 128
+      c_out: 128
+      height: 32
+      width: 32
+    pw:                # CONV1x1, group == 1
+      c_in: 256
+      c_out: 128
+      height: 16
+      width: 16
