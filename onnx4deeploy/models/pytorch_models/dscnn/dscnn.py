@@ -42,6 +42,22 @@ class DSConvBlock(nn.Module):
         return x
 
 
+def _same_padding(size: int, kernel: int, stride: int) -> int:
+    """Symmetric padding that reproduces Keras ``padding='same'`` output size.
+
+    Keras emits ``ceil(size / stride)``; this returns the smallest symmetric pad
+    ``p`` with ``floor((size + 2p - kernel) / stride) + 1 == ceil(size / stride)``.
+    Keras splits its padding asymmetrically (more on the bottom/right); the
+    symmetric equivalent shifts the receptive field by at most half a pixel and
+    keeps the graph free of a separate Pad node.
+    """
+    target = -(-size // stride)  # ceil
+    p = 0
+    while (size + 2 * p - kernel) // stride + 1 < target:
+        p += 1
+    return p
+
+
 class DSCNN(nn.Module):
     """
     DS-CNN for keyword spotting.
@@ -67,18 +83,29 @@ class DSCNN(nn.Module):
         n_freq: int = 10,
         base_channels: int = 64,
         n_ds_blocks: int = 4,
+        stem_padding=0,
     ):
         super().__init__()
         self.n_time = n_time
         self.n_freq = n_freq
 
-        # Stem conv: 1 → base_channels, kernel covers most of time/freq axis
+        # Stem conv: 1 → base_channels, kernel covers most of time/freq axis.
+        # stem_padding="same" reproduces the MLperf Tiny reference, whose stem is
+        # Conv2D(64, (10,4), strides=2, padding='same') and therefore emits a
+        # ceil(n_time/2) x ceil(n_freq/2) map (25x5 for the 49x10 reference input).
+        # The default 0 ("valid") is kept for the legacy PULP-small XS fixtures.
+        kernel = (min(10, n_time), min(4, n_freq))
+        if stem_padding == "same":
+            stem_padding = (
+                _same_padding(n_time, kernel[0], 2),
+                _same_padding(n_freq, kernel[1], 2),
+            )
         self.conv_stem = nn.Conv2d(
             1,
             base_channels,
-            kernel_size=(min(10, n_time), min(4, n_freq)),
+            kernel_size=kernel,
             stride=2,
-            padding=0,
+            padding=stem_padding,
             bias=False,
         )
         self.bn_stem = nn.BatchNorm2d(base_channels)
