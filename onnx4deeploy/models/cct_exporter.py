@@ -60,6 +60,11 @@ class CCTExporter(BaseONNXExporter):
             "use_lora": False,
             "lora_r": 4,
             "lora_alpha": 16,
+            # LoRA adapters on the FFN (linear1/linear2) as well as the attention.
+            "lora_ffn": False,
+            # FFN hidden = embedding_dim * mlp_ratio. Official CCT-2 is 1; the
+            # default stays 2 so existing exports are unchanged.
+            "mlp_ratio": 2,
             # Training loop configuration
             "learning_rate": 0.001,
             "n_batches": 4,
@@ -90,6 +95,7 @@ class CCTExporter(BaseONNXExporter):
             num_heads=self.model_config["num_heads"],
             num_layers=self.model_config["num_layers"],
             n_conv_layers=self.model_config.get("n_conv_layers", 1),
+            mlp_ratio=self.model_config.get("mlp_ratio", 2),
             positional_embedding=self.model_config.get("positional_embedding", "learnable"),
             stochastic_depth=0.0,  # Disable DropPath: no RandomUniformLike in ONNX
             dropout=0.0,  # Disable Dropout: no Dropout op in ONNX
@@ -97,6 +103,7 @@ class CCTExporter(BaseONNXExporter):
             use_lora=self.model_config.get("use_lora", False),
             lora_r=self.model_config.get("lora_r", 4),
             lora_alpha=self.model_config.get("lora_alpha", 16),
+            lora_ffn=self.model_config.get("lora_ffn", False),
         )
 
         # Randomize LayerNorm parameters (for testing)
