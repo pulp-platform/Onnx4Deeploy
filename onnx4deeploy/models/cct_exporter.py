@@ -62,6 +62,14 @@ class CCTExporter(BaseONNXExporter):
             "lora_alpha": 16,
             # LoRA adapters on the FFN (linear1/linear2) as well as the attention.
             "lora_ffn": False,
+            # Initial std of the LoRA B matrices. 0 is the LoRA paper's init (the
+            # adapter starts as the identity). A test export wants a non-zero B so the
+            # step-0 gradients reach A; left at 0, the export pipeline's
+            # randomize_initializers replaces it with a Kaiming draw whose fan-in is
+            # r (std 0.7 at r=4), which scales the adapter output ~50x past the base
+            # weights and puts attention logits at +-600 with near-ties -- a fixture no
+            # fp32 device can match to 1e-3.
+            "lora_b_init_std": 0.0,
             # FFN hidden = embedding_dim * mlp_ratio. Official CCT-2 is 1; the
             # default stays 2 so existing exports are unchanged.
             "mlp_ratio": 2,
@@ -108,6 +116,13 @@ class CCTExporter(BaseONNXExporter):
 
         # Randomize LayerNorm parameters (for testing)
         model = randomize_layernorm_params(model)
+
+        std = float(self.model_config.get("lora_b_init_std", 0.0))
+        if std > 0:
+            with torch.no_grad():
+                for name, p in model.named_parameters():
+                    if "lora" in name and name.rsplit(".", 1)[-1].endswith("B"):
+                        p.normal_(0.0, std)
 
         return model
 
