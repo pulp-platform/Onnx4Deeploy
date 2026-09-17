@@ -60,6 +60,19 @@ class CCTExporter(BaseONNXExporter):
             "use_lora": False,
             "lora_r": 4,
             "lora_alpha": 16,
+            # LoRA adapters on the FFN (linear1/linear2) as well as the attention.
+            "lora_ffn": False,
+            # Initial std of the LoRA B matrices. 0 is the LoRA paper's init (the
+            # adapter starts as the identity). A test export wants a non-zero B so the
+            # step-0 gradients reach A; left at 0, the export pipeline's
+            # randomize_initializers replaces it with a Kaiming draw whose fan-in is
+            # r (std 0.7 at r=4), which scales the adapter output ~50x past the base
+            # weights and puts attention logits at +-600 with near-ties -- a fixture no
+            # fp32 device can match to 1e-3.
+            "lora_b_init_std": 0.0,
+            # FFN hidden = embedding_dim * mlp_ratio. Official CCT-2 is 1; the
+            # default stays 2 so existing exports are unchanged.
+            "mlp_ratio": 2,
             # Training loop configuration
             "learning_rate": 0.001,
             "n_batches": 4,
@@ -90,6 +103,7 @@ class CCTExporter(BaseONNXExporter):
             num_heads=self.model_config["num_heads"],
             num_layers=self.model_config["num_layers"],
             n_conv_layers=self.model_config.get("n_conv_layers", 1),
+            mlp_ratio=self.model_config.get("mlp_ratio", 2),
             positional_embedding=self.model_config.get("positional_embedding", "learnable"),
             stochastic_depth=0.0,  # Disable DropPath: no RandomUniformLike in ONNX
             dropout=0.0,  # Disable Dropout: no Dropout op in ONNX
@@ -97,10 +111,18 @@ class CCTExporter(BaseONNXExporter):
             use_lora=self.model_config.get("use_lora", False),
             lora_r=self.model_config.get("lora_r", 4),
             lora_alpha=self.model_config.get("lora_alpha", 16),
+            lora_ffn=self.model_config.get("lora_ffn", False),
         )
 
         # Randomize LayerNorm parameters (for testing)
         model = randomize_layernorm_params(model)
+
+        std = float(self.model_config.get("lora_b_init_std", 0.0))
+        if std > 0:
+            with torch.no_grad():
+                for name, p in model.named_parameters():
+                    if "lora" in name and name.rsplit(".", 1)[-1].endswith("B"):
+                        p.normal_(0.0, std)
 
         return model
 

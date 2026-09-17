@@ -60,8 +60,11 @@ class AttentionwLora(Module):
         self.lora_v_B = nn.Parameter(torch.zeros(lora_r, dim))
 
         # Standard LoRA init: A ~ kaiming_uniform, B = 0 → initial delta is 0.
+        # A is stored (dim, r), but its fan-in is dim, not r: kaiming_uniform_ reads
+        # fan-in from size(1), so it is applied to the (r, dim) transposed view. On the
+        # (dim, r) tensor itself the bound came out sqrt(dim/r) = 5.7x too large.
         for A in (self.lora_q_A, self.lora_k_A, self.lora_v_A):
-            nn.init.kaiming_uniform_(A, a=math.sqrt(5))
+            nn.init.kaiming_uniform_(A.data.T, a=math.sqrt(5))
         # B already zeros
 
         self.attn_drop = Dropout(attention_dropout)
@@ -70,7 +73,7 @@ class AttentionwLora(Module):
 
         self.lora_proj_A = nn.Parameter(torch.zeros(dim, lora_r))
         self.lora_proj_B = nn.Parameter(torch.zeros(lora_r, dim))
-        nn.init.kaiming_uniform_(self.lora_proj_A, a=math.sqrt(5))
+        nn.init.kaiming_uniform_(self.lora_proj_A.data.T, a=math.sqrt(5))
 
         self.proj_drop = Dropout(projection_dropout)
 
@@ -297,6 +300,7 @@ class TransformerEncoderLayer(Module):
         use_lora: bool = False,
         lora_r: int = 4,
         lora_alpha: int = 16,
+        lora_ffn: bool = False,
     ):
         super(TransformerEncoderLayer, self).__init__()
 
@@ -318,13 +322,14 @@ class TransformerEncoderLayer(Module):
                 projection_dropout=dropout,
             )
 
-        # FFN layers with LoRA (rank=8)
-        # self.linear1 = LinearwLora(d_model, dim_feedforward)
-        self.linear1 = Linear(d_model, dim_feedforward)
+        # FFN adapters are opt-in: `lora_ffn` puts LinearwLora on both FFN layers,
+        # which is how the CCT_LoRA_R1 fixture was exported (adapters on attention
+        # AND FFN). Without it only the attention carries adapters.
+        ffn_linear = LinearwLora if (use_lora and lora_ffn) else Linear
+        self.linear1 = ffn_linear(d_model, dim_feedforward)
         self.dropout1 = Dropout(dropout)
         self.norm1 = LayerNorm(d_model)
-        self.linear2 = Linear(dim_feedforward, d_model)
-        # self.linear2 = LinearwLora(dim_feedforward, d_model)
+        self.linear2 = ffn_linear(dim_feedforward, d_model)
         self.dropout2 = Dropout(dropout)
         self.gelu_bias = nn.Parameter(torch.zeros(dim_feedforward))
 
@@ -412,6 +417,7 @@ class TransformerClassifier(Module):
         use_lora: bool = False,
         lora_r: int = 4,
         lora_alpha: int = 16,
+        lora_ffn: bool = False,
     ):
         super().__init__()
         positional_embedding = (
@@ -464,6 +470,7 @@ class TransformerClassifier(Module):
                     use_lora=use_lora,
                     lora_r=lora_r,
                     lora_alpha=lora_alpha,
+                    lora_ffn=lora_ffn,
                 )
                 for i in range(num_layers)
             ]
