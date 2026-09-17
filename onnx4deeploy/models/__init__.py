@@ -11,6 +11,7 @@ from .epidenet_exporter import EpiDeNetExporter
 from .lightweight_cnn_exporter import LightweightCnnExporter
 from .mamba_exporter import MambaExporter
 from .mibminet_exporter import MIBMInetExporter
+from .mobilenetv1_exporter import MobileNetV1Exporter
 from .mobilenetv2_exporter import MobileNetV2Exporter
 from .mobilevit_exporter import MobileViTExporter
 from .resnet_exporter import ResNetExporter
@@ -31,6 +32,7 @@ __all__ = [
     "SimpleCnnExporter",
     "SimpleMlpExporter",
     "ResNetExporter",
+    "MobileNetV1Exporter",
     "MobileNetV2Exporter",
     "MobileViTExporter",
     "MambaExporter",

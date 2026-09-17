@@ -40,6 +40,7 @@ def list_available_models():
         LightweightCnnExporter,
         MambaExporter,
         MIBMInetExporter,
+        MobileNetV1Exporter,
         MobileNetV2Exporter,
         MobileViTExporter,
         ResNetExporter,
@@ -169,9 +170,16 @@ def list_available_models():
             "config": {"variant": "resnet8", "img_size": 32, "num_classes": 10},
         },
         # VWW — Visual Wake Words (MobileNetV2-0.35, 96×96, 2 classes)
+        "MobileNetV1": {
+            "class": MobileNetV1Exporter,
+            "description": "MobileNetV1-0.25 (MLperf Tiny VWW reference, 96×96, ~214K params)",
+            "input_shape": "(B, 3, 96, 96)",
+            "classes": 2,
+            "config": {"width_mult": 0.25, "img_size": 96, "num_classes": 2},
+        },
         "MobileNetV2-VWW": {
             "class": MobileNetV2Exporter,
-            "description": "MobileNetV2-0.35 (MLperf Tiny VWW, 96×96, person/not-person)",
+            "description": "MobileNetV2-0.35 @96×96 (VWW-shaped variant; NOT the MLperf reference — use MobileNetV1)",
             "input_shape": "(B, 3, 96, 96)",
             "classes": 2,
             "config": {"width_mult": 0.35, "img_size": 96, "num_classes": 2},
@@ -187,10 +195,10 @@ def list_available_models():
         # KWS full-size reference (DS-CNN-S, 49×10)
         "DSCNN-S": {
             "class": DSCNNExporter,
-            "description": "DS-CNN-S (MLperf Tiny KWS reference, MFCC 49×10, ~270K params)",
+            "description": "DS-CNN-S (MLperf Tiny KWS reference, MFCC 49×10, 12 classes, ~23K params)",
             "input_shape": "(B, 1, 49, 10)",
             "classes": 12,
-            "config": {"variant": "s", "n_time": 49, "n_freq": 10},
+            "config": {"variant": "s", "n_time": 49, "n_freq": 10, "stem_padding": "same"},
         },
         # AD  — Anomaly Detection (FC Autoencoder, 128-dim, MSE loss)
         "Autoencoder": {
@@ -201,9 +209,16 @@ def list_available_models():
             "config": {"variant": "tiny", "input_dim": 128},
         },
         # AD  — full MLperf Tiny reference autoencoder
+        "Autoencoder-AD": {
+            "class": AutoencoderExporter,
+            "description": "FC Autoencoder (MLperf Tiny AD reference, 640→128×4→8→128×4→640, ~268K params)",
+            "input_shape": "(B, 640)",
+            "classes": None,
+            "config": {"variant": "mlperf_ad", "input_dim": 640},
+        },
         "Autoencoder-MLPerf": {
             "class": AutoencoderExporter,
-            "description": "FC Autoencoder (MLperf Tiny AD reference, 128→[128,128,128]→128)",
+            "description": "FC Autoencoder, 128→[128,128,128]→128 (legacy variant; NOT the MLperf reference — use Autoencoder-AD)",
             "input_shape": "(B, 128)",
             "classes": None,
             "config": {"variant": "mlperf", "input_dim": 128},

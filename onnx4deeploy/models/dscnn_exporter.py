@@ -45,6 +45,7 @@ class DSCNNExporter(BaseONNXExporter):
             "variant": "xs",  # "xs" (16ch, PULP) | "s" (64ch, full MLperf)
             "base_channels": 16,  # Overrides variant if set explicitly
             "n_ds_blocks": 4,
+            "stem_padding": 0,  # "same" reproduces the MLperf Tiny reference stem
             "opset_version": 17,
             # Training
             "training_strategy": "full",  # "full" | "last_layer" | "no_stem" | "custom"
@@ -79,6 +80,7 @@ class DSCNNExporter(BaseONNXExporter):
             n_freq=self.model_config["n_freq"],
             base_channels=self.model_config["base_channels"],
             n_ds_blocks=self.model_config["n_ds_blocks"],
+            stem_padding=self.model_config.get("stem_padding", 0),
         )
 
     # ------------------------------------------------------------------ #
